@@ -18,6 +18,7 @@
   --r:18px; --tile:118px;
   --safe-b:env(safe-area-inset-bottom,0px);
 }
+@media (max-width:520px){:root{--tile:96px}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 body{overflow:hidden}
@@ -282,7 +283,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 1.8</p>
+    <p class="small">Iris 1.9</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -299,7 +300,8 @@ const RT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-retrieval@1.2.0';
 const MODEL_URL = 'https://huggingface.co/litert-community/embeddinggemma-2-text-vision-440m-litert-lm/resolve/main/embeddinggemma-2-text-vision-440m.litertlm';
 const MODEL_MB = 388;
 const DIM = 768;
-const IMG_RE = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const IMG_RE = /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i;
+const HEIF_RE = /\.(heic|heif)$/i;
 const SAMPLES = ['10','1015','1015b','1016','1018','1020','1024','1025','1025b','103','1035','1040','1043','1050','106','1062','1069','1074','1080','1084','129','152','164','177','200','219','225','237','237b','237c','250','26','292','306','312','325','338','364','375','42','431','433','48','493'];
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -313,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 1.8';
+const VER = 'Iris 1.9';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -478,6 +480,7 @@ const AI = {
 const Prep = {
   pool: [], ok: true, seq: 0, pend: new Map(), rr: 0,
   init() { if (this.pool.length || !this.ok) return; try { const n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < n; k++) { const w = new Worker('prep-worker.js'); w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; const p = this.pend.get(data.id); if (p) { this.pend.delete(data.id); p(data.p); } }; w.onerror = (e) => { console.warn('prep worker crashed, using page', e.message); this.ok = false; for (const p of this.pend.values()) p(undefined); this.pend.clear(); }; this.pool.push(w); } } catch { this.ok = false; } },
+  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const id = ++this.seq; return new Promise((res) => { this.pend.set(id, (p) => res(p || null)); this.pool[this.rr++ % this.pool.length].postMessage({ id, op: 'big', file }); }); },
   async run(file) { this.init(); this.lastErr = ''; if (!this.ok || !this.pool.length) return prep(file); const id = ++this.seq; const r = await new Promise((res) => { this.pend.set(id, res); this.pool[this.rr++ % this.pool.length].postMessage({ id, file }); }); return r === undefined ? prep(file) : r; },
 };
 async function prep(file) {
@@ -604,7 +607,7 @@ const Indexer = {
     if (this.scanning) { toast(`Already reading ${this.scanning}…`); go('lib'); return; }
     for (const f of folders) {
       if (!(await Folders.perm(f, 'read', true))) { toast(`No access to ${f.name} yet. Tap Start again, or use “Folder, no Chrome pop-up”.`, 4500); continue; }
-      this.scanning = f.name; this.found = 0; toast(`Reading ${f.name}…`); UI.renderIndex(); Log.add('info', 'scan start', f.name);
+      DB.put('kv', 'pendingScan', true); this.scanning = f.name; this.found = 0; toast(`Reading ${f.name}…`); UI.renderIndex(); Log.add('info', 'scan start', f.name);
       Folders.stats = { skippedTypes: {}, dirErrors: 0 }; const tS = performance.now();
       const seen = new Set(); let ok = true, fresh = 0;
       try {
@@ -616,7 +619,6 @@ const Indexer = {
         }
       } catch (err) { ok = false; console.error('scan failed', f.name, err); toast('Couldn’t read ' + f.name + ': ' + err.message + '. Tap Start to reconnect it.', 6000); }
       const st = Folders.stats; Log.add('info', `scan end ${f.name}: ${this.found} photos, ${fresh} new, ${Math.round(performance.now() - tS)} ms, dir errors ${st.dirErrors}, other files`, st.skippedTypes);
-      const heic = (st.skippedTypes.heic || 0) + (st.skippedTypes.heif || 0); if (heic) toast(`${fmtN(heic)} HEIC photos can’t be read by the browser. Set the camera to JPEG to include new ones.`, 6000);
       if (st.dirErrors) ok = false; // don’t forget photos from folders we couldn’t read
       if (ok) { // forget photos that were deleted outside Iris
         const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
@@ -648,6 +650,7 @@ const Indexer = {
     let next = this.prepNext();
     while (this.queue.length || next || this.scanning) {
       if (this.paused) { await sleep(300); continue; }
+      if (performance.now() - lastTouch < 900) { await sleep(250); continue; } // you're touching the screen: let the UI have the phone
       if (!next) { if (this.queue.length) next = this.prepNext(); else { await sleep(200); continue; } }
       const job = await next; next = this.queue.length ? this.prepNext() : null;
       if (!job) continue; this.queued.delete(job.id);
@@ -659,14 +662,15 @@ const Indexer = {
       } catch (e) { this.skipped++; if (this.skipped <= 5) console.error('AI failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('The AI is failing on every photo (' + e.message + '). Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
       this.done++;
       if (this.done % 5 === 0 || !this.queue.length) UI.renderIndex();
-      if (this.done % 60 === 0 || this.done === 12) UI.refreshLight();
+      if (L.count <= 12 || (L.count < 60 && this.done % 12 === 0)) UI.refreshLight(); else if (this.done % 10 === 0) UI.newChip();
     }
-    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; UI._st = ''; Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
+    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { DB.put('kv', 'pendingScan', false); UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
     Junk.cache = null; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
     toast(`Done. ${fmtN(L.count)} photos ready to search.` + (this.skipped ? ` ${fmtN(this.skipped)} couldn’t be read.` : ''), 4500);
   },
   prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file); if (!j.p) j.err = Prep.lastErr || 'decode failed'; } catch (e) { j.err = e.name + ': ' + e.message; j.p = null; } return j; })(); },
 };
+let lastTouch = 0; for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown']) addEventListener(ev, () => { lastTouch = performance.now(); }, { passive: true, capture: true }); $('#main').addEventListener('scroll', () => { lastTouch = performance.now(); }, { passive: true });
 document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && Indexer.running && !Indexer.wake) { try { Indexer.wake = await navigator.wakeLock?.request('screen'); } catch {} } });
 
 /* ---------------- Search ---------------- */
@@ -912,12 +916,13 @@ const Viewer = {
     $('#vBin').textContent = m.status === 'trash' ? 'Restore' : 'Move to bin'; $('#vBin').classList.toggle('danger', m.status !== 'trash');
     $('#vPrev').style.visibility = this.i > 0 ? 'visible' : 'hidden'; $('#vNext').style.visibility = this.i < this.list.length - 1 ? 'visible' : 'hidden';
     const f = await Folders.fileFor(id, false); $('#vFull').classList.toggle('hide', !!f);
-    if (f && this.list[this.i] === id) { this.fullUrl = URL.createObjectURL(f); $('#vImg').src = this.fullUrl; }
+    if (f && this.list[this.i] === id) await this.showFile(f, id);
   },
+  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b || this.list[this.i] !== id) return; } if (this.fullUrl) URL.revokeObjectURL(this.fullUrl); this.fullUrl = URL.createObjectURL(b); $('#vImg').src = this.fullUrl; },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.show(); },
 };
 $('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.step(-1); $('#vNext').onclick = () => Viewer.step(1);
-$('#vFull').onclick = async () => { const id = Viewer.list[Viewer.i]; const f = await Folders.fileFor(id, true); if (!f) return toast('Couldn’t open the original.'); Viewer.fullUrl = URL.createObjectURL(f); $('#vImg').src = Viewer.fullUrl; $('#vFull').classList.add('hide'); };
+$('#vFull').onclick = async () => { const id = Viewer.list[Viewer.i]; const f = await Folders.fileFor(id, true); if (!f) return toast('Couldn’t open the original.'); await Viewer.showFile(f, id); $('#vFull').classList.add('hide'); };
 $('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id); };
 $('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id, true); };
 $('#vColl').onclick = () => addToColl([Viewer.list[Viewer.i]]);
@@ -1056,8 +1061,10 @@ const UI = {
       else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
       else if (AI.state === 'busy' && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, 'Getting the AI ready. This takes up to a minute the first time…')));
       else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
+      else if (UI.pendingScan && L.folders.size) ban.append(h('div', { class: 'banner' }, h('span', {}, `Iris stopped at ${fmtN(L.count)} photos before finishing.`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Continue')));
       else if (L.count && L.folders.size && [...L.folders.values()].some((f) => Date.now() - (f.lastScan || 0) > 864e5)) ban.append(h('div', { class: 'banner' }, h('span', {}, 'New photos since last time?'), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check now'))); }
   },
+  newChip() { if (cur !== 'search' || S.q) return; const shown = $('#sres .grid')?._ids?.length || 0; const n = L.live().length - shown; let c = $('#newChip'); if (n <= 0) { c?.remove(); return; } if (!c) { c = h('button', { id: 'newChip', class: 'chip on', onclick: () => { c.remove(); renderSearch(); $('#main').scrollTop = 0; } }); $('#sbar').append(h('span', { class: 'sp' }), c); } c.textContent = `↻ ${fmtN(n)} new`; },
   binCount() { const n = L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length; $('#binN').textContent = n ? `(${n})` : ''; },
   refreshLight() { if (cur === 'search' && !S.q && !$('#viewer').classList.contains('on') && $('#main').scrollTop < 200) renderSearch(); this.binCount(); },
   refreshAll() { Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); this.binCount(); },
@@ -1080,7 +1087,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.8): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.9): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
@@ -1097,6 +1104,7 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
   for (const [id, buf] of vecs) { const m = metas.get(id); if (m) L.add(m, new Float32Array(buf)); }
   for (const [id, f] of await DB.all('folders')) L.folders.set(id, f);
   for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
+  UI.pendingScan = !!(await DB.get('kv', 'pendingScan'));
   renderSearchChips(); renderSearch(); renderPickSrc(); UI.binCount(); UI.renderIndex();
   const rot = ['Describe a photo…', 'golden hour at the beach', 'mi perro durmiendo', 'birthday cake with candles', 'old books on a table', 'beach -people'];
   let ri = 0; setInterval(() => { if (!S.img && document.activeElement !== $('#q')) $('#q').placeholder = rot[ri++ % rot.length]; }, 3500);
