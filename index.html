@@ -282,7 +282,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 1.6</p>
+    <p class="small">Iris 1.7</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -556,7 +556,8 @@ const Folders = {
     await DB.del('folders', f.id); L.folders.delete(f.id); UI.refreshAll(); toast(`Removed ${f.name} from Iris. Your files are untouched.`);
   },
   async *walk(dir, path = []) {
-    for await (const [name, h] of dir.entries()) {
+    let it; try { it = dir.entries(); } catch { return; }
+    for await (const [name, h] of it) {
       if (name.startsWith('.')) continue;
       if (h.kind === 'directory') { if (/^(\.thumbnails|cache|\.trash)/i.test(name)) continue; yield* this.walk(h, [...path, name]); }
       else if (IMG_RE.test(name)) yield { h, path, name };
@@ -573,26 +574,31 @@ const Folders = {
 
 /* ---------------- Indexer ---------------- */
 const Indexer = {
-  queue: [], running: false, paused: false, done: 0, total: 0, skipped: 0, t0: 0, cur: '', wake: null,
+  queue: [], queued: new Set(), running: false, paused: false, done: 0, total: 0, skipped: 0, t0: 0, cur: '', wake: null,
+  scanning: '', found: 0,
   async scan(folders) {
+    if (this.scanning) { toast(`Already reading ${this.scanning}…`); go('lib'); return; }
     for (const f of folders) {
-      if (!(await Folders.perm(f, 'read', true))) { toast(`Chrome didn't allow access to ${f.name}. Tap again and choose Allow.`, 4000); continue; }
-      UI.indexStatus(`Looking through ${f.name}…`);
-      const seen = new Set(); let found = 0;
+      if (!(await Folders.perm(f, 'read', true))) { toast(`No access to ${f.name} yet. Tap Start again, or use “Folder, no Chrome pop-up”.`, 4500); continue; }
+      this.scanning = f.name; this.found = 0; toast(`Reading ${f.name}…`); UI.renderIndex();
+      const seen = new Set(); let ok = true, fresh = 0;
       try {
         for await (const e of Folders.walk(f.handle)) {
-          const file = await e.h.getFile().catch(() => null); if (!file) continue;
-          const id = `${f.id}:${e.path.join('/')}/${e.name}:${file.size}:${file.lastModified}`; seen.add(id); found++;
-          if (!L.meta.has(id)) this.queue.push({ id, getFile: async () => file, base: { id, name: e.name, path: e.path, folder: f.id, size: file.size, mtime: file.lastModified, src: 'folder' } });
-          if (found % 200 === 0) { UI.indexStatus(`Looking through ${f.name}… ${fmtN(found)} photos`); await sleep(0); }
+          const id = `${f.id}:${e.path.join('/')}/${e.name}`; seen.add(id); this.found++;
+          if (!L.meta.has(id) && !this.queued.has(id)) { this.queued.add(id); fresh++; this.queue.push({ id, getFile: () => e.h.getFile(), base: { id, name: e.name, path: e.path, folder: f.id, src: 'folder' } });
+            if (fresh % 20 === 1) { this.grow(); if (!this.running) this.start(); } }
+          if (this.found % 100 === 0) { UI.renderIndex(); await sleep(0); }
         }
-      } catch (err) { console.error(err); toast('Stopped reading ' + f.name + ': ' + err.message); }
-      // forget photos that were deleted or edited outside Iris
-      const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
-      if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); }
-      f.lastScan = Date.now(); f.count = found; await DB.put('folders', f.id, f);
+      } catch (err) { ok = false; console.error(err); toast('Stopped reading ' + f.name + ': ' + err.message, 5000); }
+      if (ok) { // forget photos that were deleted outside Iris
+        const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
+        if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); }
+        f.lastScan = Date.now(); f.count = this.found; await DB.put('folders', f.id, f);
+      }
+      if (!fresh) toast(`${f.name}: ${fmtN(this.found)} photos, nothing new.`);
     }
-    this.grow(); this.start();
+    this.scanning = ''; this.grow(); UI.renderIndex();
+    if (!this.running) this.start();
   },
   grow() { if (this.running) this.total = this.done + this.queue.length + 1; },
   addFiles(files, src = 'pick') {
@@ -606,25 +612,26 @@ const Indexer = {
   },
   async start() {
     if (this.running) { UI.renderIndex(); return; }
-    if (!this.queue.length) { UI.indexStatus(''); UI.refreshAll(); return; }
+    if (!this.queue.length && !this.scanning) { UI.indexStatus(''); UI.refreshAll(); return; }
     if (!(await ensureAI())) { UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
     this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now();
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
     UI.renderIndex();
     let next = this.prepNext();
-    while (this.queue.length || next) {
+    while (this.queue.length || next || this.scanning) {
       if (this.paused) { await sleep(300); continue; }
+      if (!next) { if (this.queue.length) next = this.prepNext(); else { await sleep(200); continue; } }
       const job = await next; next = this.queue.length ? this.prepNext() : null;
-      if (!job) continue;
+      if (!job) continue; this.queued.delete(job.id);
       if (!job.p) { this.skipped++; this.done++; continue; }
       try {
         const vec = await AI.image(job.p.bytes);
-        const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, status: null, at: Date.now() };
+        const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, mtime: job.base.mtime || job.file?.lastModified || Date.now(), status: null, at: Date.now() };
         await DB.saveItem(m, job.p.thumb, vec); L.add(m, vec); this.cur = job.base.id;
       } catch (e) { console.error(e); this.skipped++; }
       this.done++;
       if (this.done % 5 === 0 || !this.queue.length) UI.renderIndex();
-      if (this.done % 60 === 0) UI.refreshLight();
+      if (this.done % 60 === 0 || this.done === 12) UI.refreshLight();
     }
     this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; UI._st = '';
     Junk.cache = null; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
@@ -1009,10 +1016,12 @@ const UI = {
         c.append(h('div', { class: 'idx' }, img, h('div', { class: 'meta' }, h('strong', {}, I.paused ? 'Paused' : 'Understanding your photos…'), h('p', { class: 'small' }, `${fmtN(I.done)} of ${fmtN(I.total)} · about ${fmtDur(eta)} left` + (I.skipped ? ` · ${I.skipped} skipped` : '')), h('div', { class: 'progress', style: 'margin-top:8px' }, h('div', { style: `width:${(I.done / Math.max(1, I.total) * 100).toFixed(1)}%` }))),
           h('button', { class: 'btn sm', onclick: () => { I.paused = !I.paused; UI.renderIndex(); } }, I.paused ? 'Resume' : 'Pause')));
         c.append(h('p', { class: 'small', style: 'margin-top:8px' }, 'Keep Iris open and the tablet charging. The screen stays on while this runs.')); }
+      else if (I.scanning) c.append(h('p', {}, `📁 Reading ${I.scanning}… ${fmtN(I.found)} photos found`));
       else if (this._st) c.append(h('p', {}, this._st));
       else return null; return c; };
     if (card) { card.innerHTML = ''; const c = html(); if (c) card.append(c); }
-    if (ban) { ban.innerHTML = ''; if (I.running) ban.append(h('div', { class: 'banner' }, h('span', {}, `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}, about ${fmtDur(eta)} left`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
+    if (ban) { ban.innerHTML = ''; if (I.scanning && !I.done) ban.append(h('div', { class: 'banner' }, h('span', {}, `📁 Reading ${I.scanning}… ${fmtN(I.found)} photos found`)));
+      else if (I.running) ban.append(h('div', { class: 'banner' }, h('span', {}, `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' (still finding more)' : `, about ${fmtDur(eta)} left`)), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
       else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
       else if (AI.state === 'busy' && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, 'Getting the AI ready. This takes up to a minute the first time…')));
       else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
@@ -1040,7 +1049,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.6): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.7): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
