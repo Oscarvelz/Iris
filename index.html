@@ -277,13 +277,13 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <p class="sub" style="font-size:17px">Search your photos by meaning, clear out duplicates and junk, and pick your best shots. All on this device, all private.</p>
     <div class="steps">
       <div class="step"><b>1</b><div><strong>Download the AI once</strong><p>Google's EmbeddingGemma 2 vision model, about 388 MB. Use Wi‑Fi. After that it works offline.</p></div></div>
-      <div class="step"><b>2</b><div><strong>Pick your photo folders</strong><p>Choose one parent folder like DCIM or Pictures, so Chrome asks only once. Iris only reads what you pick.</p></div></div>
+      <div class="step"><b>2</b><div><strong>Pick your photo folders</strong><p>Choose one parent folder like DCIM or Pictures, so you’re asked only once. Iris only reads what you pick.</p></div></div>
       <div class="step"><b>3</b><div><strong>Let it look at everything</strong><p>The first pass takes a while on big libraries. Keep the tablet charging with Iris open. New photos are quick after that.</p></div></div>
     </div>
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.6</p>
+    <p class="small">Iris 2.7</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.6';
+const VER = 'Iris 2.7';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -443,7 +443,7 @@ const AI = {
       try {
         if (!(await this.cached())) await this.download();
         let adapter = null; try { adapter = await navigator.gpu?.requestAdapter(); } catch {}
-        if (!adapter) throw new Error('This browser can\u2019t reach the graphics chip (WebGPU), which the AI needs. Update Chrome, and check chrome://gpu shows WebGPU as enabled.');
+        if (!adapter) throw new Error('This browser can\u2019t reach the graphics chip (WebGPU), which the AI needs. Update your browser.');
         this.setPill('busy', 'Starting AI…');
         try { this.emb = await this.startWorker(); }
         catch (we) { // worker failed: run on the page instead (may feel slower)
@@ -578,7 +578,7 @@ const Folders = {
     return new Promise((res) => {
       const finish = (v) => { Modal.close(); res(v); };
       Modal.open(h('div', {}, h('h2', {}, '📁 Reconnect ' + f.name),
-        h('p', { class: 'sub' }, `Chrome forgets folder access when Iris closes. Tap Open, then “Use this folder” on ${f.name}` + (mode === 'readwrite' ? ', and Allow editing so Iris can delete.' : '.')),
+        h('p', { class: 'sub' }, `Your browser forgets folder access when Iris closes. Tap Open, then “Use this folder” on ${f.name}` + (mode === 'readwrite' ? ', and Allow editing so Iris can delete.' : '.')),
         h('p', { class: 'small' }, 'If Allow won’t respond, close floating apps (fooView, screen filters, chat bubbles) first.'),
         h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => finish(false) }, 'Not now'),
           h('button', { class: 'btn pri', onclick: async () => {
@@ -642,7 +642,7 @@ const Indexer = {
   async scan(folders) {
     if (this.scanning) { toast(`Already reading ${this.scanning}…`); go('lib'); return; }
     for (const f of folders) {
-      if (!(await Folders.perm(f, 'read', true))) { toast(`No access to ${f.name} yet. Tap Start again, or use “Folder, no Chrome pop-up”.`, 4500); continue; }
+      if (!(await Folders.perm(f, 'read', true))) { toast(`No access to ${f.name} yet. Tap Start again, or use “Folder, no pop-up”.`, 4500); continue; }
       DB.put('kv', 'pendingScan', true); this.scanning = f.name; this.found = 0; toast(`Reading ${f.name}…`); UI.renderIndex(); Log.add('info', 'scan start', f.name);
       Folders.stats = { skippedTypes: {}, dirErrors: 0 }; const tS = performance.now();
       const seen = new Set(); let ok = true, fresh = 0;
@@ -778,8 +778,8 @@ function renderSearch() {
 }
 function emptyLib() {
   return h('div', { class: 'empty' }, h('div', { class: 'big' }, '🖼️'), h('h2', {}, 'No photos yet'), h('p', {}, 'Add a folder from your tablet.'),
-    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => $('#fDir').click() }, 'Folder, no Chrome pop-up')),
-    h('p', { class: 'small', style: 'margin-top:14px' }, 'Can’t tap Allow? Floating apps like fooView or screen filters block Chrome’s buttons. Close them, or use “Folder, no Chrome pop-up”.'));
+    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => pickDir() }, 'Folder, no pop-up')),
+    h('p', { class: 'small', style: 'margin-top:14px' }, 'Can’t tap Allow? Floating apps like fooView or screen filters block the browser’s Allow button. Close them, or use “Folder, no pop-up”.'));
 }
 
 /* ---------------- Junk sweeper ---------------- */
@@ -938,7 +938,7 @@ async function deleteFromDevice(ids) {
     if (!(await Folders.perm(f, 'readwrite', true))) { fail += ms.length; continue; }
     for (const m of ms) { try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
   await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Dups.groups = null;
-  UI.refreshAll(); toast(fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (Chrome or Android refused).` : `Deleted ${ok} photos from your device.` + (local.length ? ` Removed ${local.length} from Iris.` : ''), 4500);
+  UI.refreshAll(); toast(fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : `Deleted ${ok} photos from your device.` + (local.length ? ` Removed ${local.length} from Iris.` : ''), 4500);
 }
 
 /* ---------------- Viewer ---------------- */
@@ -1036,7 +1036,7 @@ async function renderClean() {
     const ids = L.ids.filter((id) => L.meta.get(id)?.status === 'trash'); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
     body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin')), h('p', {}, bytes ? fmtMB(bytes) + ' can be freed' : 'Nothing will be deleted until you say so.'),
       ids.length ? h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn', onclick: async () => { await setStatus(ids, null); renderClean(); toast('Restored everything'); } }, 'Restore all'),
-        h('button', { class: 'btn danger', onclick: async () => { if (await confirm2(`Delete ${ids.length} photos from this device?`, 'This removes the files from your folders and can’t be undone here. Chrome will ask for permission to edit the folder: choose Allow.', 'Delete forever', true)) deleteFromDevice(ids); } }, 'Delete from device')) : ''));
+        h('button', { class: 'btn danger', onclick: async () => { if (await confirm2(`Delete ${ids.length} photos from this device?`, 'This removes the files from your folders and can’t be undone here. Your browser will ask for permission to edit the folder: choose Allow.', 'Delete forever', true)) deleteFromDevice(ids); } }, 'Delete from device')) : ''));
     if (ids.length) body.append(grid(ids, { noTrashStyle: true })); else body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty.')));
   }
 }
@@ -1052,10 +1052,10 @@ async function renderLib() {
   const b = $('#libBody'); b.innerHTML = '';
   const idx = h('div', { id: 'idxCard' }); b.append(idx); UI.renderIndex();
   const folders = h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Folders'));
-  if (!L.folders.size) folders.append(h('p', {}, Folders.supported ? 'No folders yet. Pick one parent folder like DCIM or Pictures so Chrome only asks once.' : 'This browser can’t open folders, so add photos directly instead.'));
+  if (!L.folders.size) folders.append(h('p', {}, Folders.supported ? 'No folders yet. Pick one parent folder like DCIM or Pictures so you’re only asked once.' : 'This browser can’t open folders, so add photos directly instead.'));
   for (const f of L.folders.values()) { const n = L.ids.filter((id) => L.meta.get(id)?.folder === f.id).length;
     folders.append(h('div', { class: 'kv', style: 'align-items:center;gap:8px' }, h('span', {}, '📁 ' + f.name), h('span', { style: 'display:flex;gap:6px;align-items:center' }, h('span', { class: 'small' }, fmtN(n) + ' photos'), h('button', { class: 'btn sm', onclick: () => Indexer.scan([f]) }, 'Check for new'), h('button', { class: 'btn sm', onclick: async () => { if (await confirm2(`Remove ${f.name}?`, 'Iris forgets these photos. Your files stay exactly where they are.', 'Remove')) Folders.remove(f); } }, '✕')))); }
-  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => $('#fDir').click() }, '+ Folder, no Chrome pop-up'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
+  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => pickDir() }, '+ Folder, no pop-up'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
   b.append(folders);
   let est = {}; try { est = await navigator.storage.estimate(); } catch {}
   const cached = await AI.cached();
@@ -1121,13 +1121,21 @@ function go(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
 $('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
 $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
+// "Folder, no pop-up" uses <input webkitdirectory>. Some Android browsers (Edge) ignore it silently, so watch for the
+// picker actually opening; if the page never loses focus, say so instead of doing nothing.
+function pickDir() {
+  let opened = false; const mark = () => { opened = true; }; window.addEventListener('blur', mark, { once: true }); document.addEventListener('visibilitychange', mark, { once: true });
+  $('#fDir').click();
+  setTimeout(() => { window.removeEventListener('blur', mark); if (!opened && !document.hidden) toast('This browser can’t open a folder this way. Use + Add folder instead.', 6000); }, 1800);
+  window.addEventListener('focus', () => setTimeout(() => { if (!$('#fDir').files?.length) return; toast('Reading the folder… big folders take a minute.', 8000); }, 50), { once: true });
+}
 $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) => IMG_RE.test(f.name)); e.target.value = ''; if (fs.length) { Indexer.addFiles(fs, 'dir'); toast(`Adding ${fmtN(fs.length)} photos`); } else toast('No photos found in that folder.'); };
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.6): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.7): ' + e.message, 6000); } };
 function askFolder() {
-  Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
+  Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
 }
 $('#obFile').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#fModel').click(); };
