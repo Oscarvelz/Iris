@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#07070d">
+<meta name="description" content="Iris: private, on-device AI to search, clean up and pick the best of your photos.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>Iris</title>
+<style>
+:root{
+  --bg:#07070d; --bg2:#0e0e18; --card:rgba(255,255,255,.045); --card2:rgba(255,255,255,.08);
+  --line:rgba(255,255,255,.09); --text:#eeeef6; --mute:#9a9ab3; --dim:#6b6b85;
+  --a1:#7c5cff; --a2:#28d2e6; --a3:#ff5a96; --ok:#4ade80; --bad:#ff5a6e; --warn:#ffb85a;
+  --grad:linear-gradient(120deg,var(--a1),var(--a2));
+  --r:18px; --tile:118px;
+  --safe-b:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{overflow:hidden}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+input,select{font:inherit;color:var(--text)}
+.app{display:grid;grid-template-rows:auto 1fr auto;height:100%}
+@media (min-width:900px){.app{grid-template-columns:92px 1fr;grid-template-rows:auto 1fr}.nav{grid-row:1/3;grid-column:1;flex-direction:column;justify-content:flex-start;padding-top:80px;border-top:0;border-right:1px solid var(--line)}header{grid-column:2}main{grid-column:2}:root{--tile:150px}}
+header{display:flex;align-items:center;gap:12px;padding:14px 18px 10px;position:relative;z-index:3}
+.logo{display:flex;align-items:center;gap:10px;font-weight:750;font-size:21px;letter-spacing:.2px}
+.logo img{width:32px;height:32px;border-radius:9px}
+.logo span{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.pill{margin-left:auto;display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-size:12.5px;color:var(--mute);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
+.dot.ok{background:var(--ok);box-shadow:0 0 10px var(--ok)} .dot.busy{background:var(--warn);animation:pulse 1s infinite} .dot.err{background:var(--bad)}
+@keyframes pulse{50%{opacity:.35}}
+main{overflow:auto;position:relative;padding:0 18px calc(110px + var(--safe-b));scroll-behavior:smooth}
+.view{display:none;max-width:1500px;margin:0 auto;animation:fade .25s ease}
+.view.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}}
+.nav{display:flex;justify-content:space-around;gap:4px;padding:8px 6px calc(8px + var(--safe-b));background:rgba(9,9,16,.92);backdrop-filter:blur(18px);border-top:1px solid var(--line);z-index:5}
+.nav button{display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 10px;border-radius:14px;color:var(--dim);font-size:11.5px;min-width:62px;transition:.2s}
+.nav button svg{width:24px;height:24px}
+.nav button.on{color:var(--text);background:var(--card2)}
+.nav button.on svg{stroke:url(#g)}
+h1{font-size:30px;line-height:1.15;margin:8px 0 4px;letter-spacing:-.4px}
+h2{font-size:19px;margin:22px 0 10px;letter-spacing:-.2px}
+.sub{color:var(--mute);margin:0 0 14px}
+.grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+/* search */
+.searchbox{position:sticky;top:0;z-index:4;padding:6px 0 10px;background:linear-gradient(var(--bg) 75%,transparent)}
+.sb{display:flex;align-items:center;gap:10px;padding:6px 6px 6px 16px;border-radius:22px;background:var(--bg2);border:1px solid var(--line);box-shadow:0 10px 40px rgba(124,92,255,.10);transition:.2s}
+.sb:focus-within{border-color:rgba(124,92,255,.6);box-shadow:0 10px 50px rgba(124,92,255,.25)}
+.sb input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:18px;padding:10px 0}
+.sb .qimg{width:42px;height:42px;border-radius:12px;object-fit:cover;border:2px solid var(--a2)}
+.iconbtn{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:var(--card);flex:none}
+.iconbtn:active{transform:scale(.94)}
+.iconbtn svg{width:22px;height:22px}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:10px 0 2px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;padding:8px 14px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-size:13.5px;color:var(--mute);white-space:nowrap;transition:.15s}
+.chip:active{transform:scale(.96)} .chip.on{background:rgba(124,92,255,.18);border-color:rgba(124,92,255,.55);color:var(--text)}
+.chip.neg{border-color:rgba(255,90,110,.5)}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0 12px;color:var(--mute);font-size:13.5px}
+.bar .sp{flex:1}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 18px;border-radius:14px;background:var(--card2);border:1px solid var(--line);font-weight:600;font-size:14.5px;transition:.15s;white-space:nowrap}
+.btn:active{transform:scale(.97)} .btn:disabled{opacity:.4;pointer-events:none}
+.btn.pri{background:var(--grad);border:0;color:#fff;box-shadow:0 8px 30px rgba(124,92,255,.35)}
+.btn.danger{background:rgba(255,90,110,.15);border-color:rgba(255,90,110,.45);color:#ffb3bd}
+.btn.sm{padding:8px 13px;font-size:13px;border-radius:12px}
+.btn svg{width:18px;height:18px}
+/* grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--tile),1fr));gap:6px}
+.tile{position:relative;aspect-ratio:1;border-radius:12px;overflow:hidden;background:var(--bg2);cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.tile img{width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .3s,transform .25s}
+.tile img.ld{opacity:1}
+.tile:hover img{transform:scale(1.04)}
+.tile .badge{position:absolute;left:6px;top:6px;padding:2px 7px;border-radius:8px;font-size:11px;font-weight:700;background:rgba(0,0,0,.6);backdrop-filter:blur(6px)}
+.tile .badge.best{background:linear-gradient(120deg,#ffcf5a,#ff8a3d);color:#1a1000}
+.tile .num{position:absolute;right:6px;bottom:6px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:800;background:var(--grad)}
+.tile .ck{position:absolute;right:7px;top:7px;width:24px;height:24px;border-radius:50%;border:2px solid rgba(255,255,255,.85);background:rgba(0,0,0,.25);display:none;place-items:center}
+.selmode .tile .ck{display:grid}
+.tile.sel .ck{background:var(--a1);border-color:var(--a1)} .tile.sel .ck::after{content:"";width:6px;height:11px;border:solid #fff;border-width:0 2.5px 2.5px 0;transform:rotate(45deg) translate(-1px,-1px)}
+.tile.sel img{transform:scale(.88);border-radius:10px}
+.tile.trash img{filter:grayscale(1) brightness(.45)}
+.tile.trash::after{content:"In bin";position:absolute;inset:auto 0 6px 0;text-align:center;font-size:11px;color:#ffb3bd;font-weight:700}
+.tile.up{outline:3px solid var(--ok);outline-offset:-3px} .tile.down{outline:3px solid var(--bad);outline-offset:-3px}
+.tile.up::before,.tile.down::before{position:absolute;right:6px;top:6px;z-index:2;font-size:16px}
+.tile.up::before{content:"👍"} .tile.down::before{content:"👎"}
+.tile .rm{position:absolute;inset:0;background:rgba(255,40,70,.18);display:none}
+.tile.mark .rm{display:block} .tile.mark img{filter:grayscale(.8) brightness(.55)}
+.tile.mark::after{content:"✕";position:absolute;right:8px;top:4px;font-weight:900;color:#ff8a9a;font-size:18px}
+.more{height:40px}
+.empty{padding:50px 20px;text-align:center;color:var(--mute)}
+.empty .big{font-size:44px;margin-bottom:6px}
+/* cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.card{border-radius:var(--r);background:var(--card);border:1px solid var(--line);padding:16px;position:relative;overflow:hidden}
+.card.click{cursor:pointer;transition:.18s} .card.click:active{transform:scale(.985)}
+.card h3{margin:0 0 4px;font-size:16.5px} .card p{margin:0;color:var(--mute);font-size:13.5px}
+.card .cnt{font-size:28px;font-weight:800}
+.mini{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:12px}
+.mini img,.mini div{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:var(--bg2)}
+.cover{height:150px;margin:-16px -16px 12px;background:var(--bg2) center/cover}
+.cover img{width:100%;height:100%;object-fit:cover}
+.group{border-radius:var(--r);background:var(--card);border:1px solid var(--line);padding:12px;margin-bottom:12px}
+.group .row{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
+.group .row .tile{flex:0 0 calc(var(--tile) * 1.15)}
+.group .gh{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13.5px;color:var(--mute)}
+.group .gh .sp{flex:1}
+.seg{display:inline-flex;padding:4px;border-radius:14px;background:var(--card);border:1px solid var(--line);gap:2px;margin-bottom:12px}
+.seg button{padding:8px 16px;border-radius:11px;color:var(--mute);font-weight:600;font-size:14px}
+.seg button.on{background:var(--card2);color:var(--text)}
+.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.field label{font-size:13px;color:var(--mute);font-weight:600}
+.field input[type=text],.field input[type=month],.field select{padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--bg2);outline:0}
+input[type=range]{width:100%;accent-color:var(--a1)}
+.rowf{display:flex;gap:12px;flex-wrap:wrap}.rowf>*{flex:1;min-width:150px}
+.progress{height:8px;border-radius:99px;background:var(--card2);overflow:hidden}
+.progress>div{height:100%;width:0;background:var(--grad);transition:width .3s}
+.idx{display:flex;gap:14px;align-items:center}
+.idx img{width:64px;height:64px;border-radius:12px;object-fit:cover;background:var(--bg2)}
+.idx .meta{flex:1;min-width:0}
+.kv{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line);font-size:14px}.kv span:first-child{color:var(--mute)}
+.banner{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:16px;background:linear-gradient(120deg,rgba(124,92,255,.16),rgba(40,210,230,.10));border:1px solid rgba(124,92,255,.35);margin:6px 0 12px;font-size:14px}
+.banner .sp{flex:1}
+/* overlays */
+.ov{position:fixed;inset:0;z-index:20;display:none}
+.ov.on{display:block}
+.scrim{position:absolute;inset:0;background:rgba(3,3,8,.72);backdrop-filter:blur(8px);animation:fade .2s}
+.sheet{position:absolute;left:50%;bottom:0;transform:translateX(-50%);width:min(620px,100%);max-height:88%;overflow:auto;background:#11111c;border:1px solid var(--line);border-radius:26px 26px 0 0;padding:22px 20px calc(22px + var(--safe-b));animation:up .28s cubic-bezier(.2,.9,.3,1)}
+@media(min-width:700px){.sheet{bottom:auto;top:50%;transform:translate(-50%,-50%);border-radius:26px;animation:fade .2s}}
+@keyframes up{from{transform:translate(-50%,40%)}}
+.sheet h2{margin-top:0}
+.sheet .acts{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
+#viewer .stage{position:absolute;inset:0;display:flex;flex-direction:column}
+#viewer .vtop{display:flex;align-items:center;gap:10px;padding:12px 14px;z-index:2}
+#viewer .vtop .t{flex:1;min-width:0;font-size:13px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#viewer .pic{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;touch-action:pan-y}
+#viewer .pic img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+#viewer .nv{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:64px;border-radius:14px;background:rgba(255,255,255,.06);display:grid;place-items:center;font-size:26px}
+#viewer .nv.l{left:10px}#viewer .nv.r{right:10px}
+#viewer .vacts{display:flex;gap:8px;overflow-x:auto;padding:12px 14px calc(14px + var(--safe-b));justify-content:center;flex-wrap:wrap}
+.toast{position:fixed;left:50%;bottom:calc(96px + var(--safe-b));transform:translateX(-50%) translateY(20px);opacity:0;padding:12px 18px;border-radius:14px;background:#1d1d2c;border:1px solid var(--line);box-shadow:0 20px 50px rgba(0,0,0,.5);z-index:40;transition:.25s;font-size:14px;max-width:90%;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%)}
+#selbar{position:fixed;left:50%;bottom:calc(84px + var(--safe-b));transform:translateX(-50%) translateY(150%);z-index:15;display:flex;align-items:center;gap:6px;padding:8px;border-radius:20px;background:#191926;border:1px solid var(--line);box-shadow:0 20px 60px rgba(0,0,0,.6);transition:.25s;max-width:96%;overflow-x:auto}
+#selbar.on{transform:translateX(-50%)}
+#selbar .n{padding:0 10px;font-weight:700;white-space:nowrap}
+/* onboarding */
+#onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(124,92,255,.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(40,210,230,.18),transparent 60%),var(--bg);overflow:auto}
+.ob{max-width:620px;margin:0 auto;padding:60px 24px 40px;text-align:center}
+.ob img.hero{width:120px;height:120px;border-radius:30px;box-shadow:0 30px 80px rgba(124,92,255,.45);animation:float 5s ease-in-out infinite}
+@keyframes float{50%{transform:translateY(-8px) rotate(3deg)}}
+.ob h1{font-size:40px;margin:22px 0 8px}
+.steps{text-align:left;margin:26px 0;display:flex;flex-direction:column;gap:10px}
+.step{display:flex;gap:14px;align-items:flex-start;padding:14px;border-radius:16px;background:var(--card);border:1px solid var(--line)}
+.step b{display:grid;place-items:center;flex:none;width:30px;height:30px;border-radius:10px;background:var(--grad);color:#fff}
+.step p{margin:2px 0 0;color:var(--mute);font-size:13.5px}
+.small{font-size:12.5px;color:var(--dim)}
+.hide{display:none!important}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--mute)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#28d2e6"/></linearGradient></defs></svg>
+
+<div class="app">
+  <header>
+    <div class="logo"><img src="icon-192.png" alt=""><span>Iris</span></div>
+    <button class="pill" id="pill" title="AI status"><i class="dot" id="pdot"></i><span id="ptext">AI not loaded</span></button>
+  </header>
+
+  <main id="main">
+    <!-- SEARCH -->
+    <section class="view on" id="v-search">
+      <div class="searchbox">
+        <div class="sb">
+          <img class="qimg hide" id="qimg" alt="">
+          <input id="q" type="search" autocomplete="off" enterkeyhint="search" placeholder="Describe a photo…">
+          <button class="iconbtn hide" id="qclear" title="Clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        </div>
+        <div class="chips" id="schips"></div>
+      </div>
+      <div id="sbanner"></div>
+      <div class="bar" id="sbar"></div>
+      <div id="sres"></div>
+    </section>
+
+    <!-- CLEAN -->
+    <section class="view" id="v-clean">
+      <h1>Clean <span class="grad">up</span></h1>
+      <p class="sub">Find duplicates and junk. Nothing is deleted until you empty the bin.</p>
+      <div class="seg" id="cseg"><button data-t="dup" class="on">Duplicates</button><button data-t="junk">Junk</button><button data-t="bin">Bin <span id="binN"></span></button></div>
+      <div id="cbody"></div>
+    </section>
+
+    <!-- COLLECTIONS -->
+    <section class="view" id="v-coll">
+      <h1>Smart <span class="grad">collections</span></h1>
+      <p class="sub">Saved searches that fill themselves as new photos arrive.</p>
+      <div class="bar"><button class="btn pri sm" id="newColl">+ New collection</button></div>
+      <div id="collBody"></div>
+    </section>
+
+    <!-- PICK -->
+    <section class="view" id="v-pick">
+      <h1>Best <span class="grad">of</span></h1>
+      <p class="sub">Picks sharp, well-lit and varied highlights, with no 20 versions of the same sunset.</p>
+      <div class="card" style="margin-bottom:14px">
+        <div class="rowf">
+          <div class="field"><label>From</label><select id="pSrc"></select></div>
+          <div class="field"><label>Only matching (optional)</label><input type="text" id="pQ" placeholder="e.g. people smiling, beach…"></div>
+        </div>
+        <div class="rowf">
+          <div class="field"><label>Start month (optional)</label><input type="month" id="pFrom"></div>
+          <div class="field"><label>End month (optional)</label><input type="month" id="pTo"></div>
+        </div>
+        <div class="rowf">
+          <div class="field"><label>How many: <b id="pKv">20</b></label><input type="range" id="pK" min="4" max="80" value="20"></div>
+          <div class="field"><label>Variety: <b id="pVv">High</b></label><input type="range" id="pV" min="0" max="100" value="70"></div>
+        </div>
+        <button class="btn pri" id="pGo">✦ Pick the best</button>
+      </div>
+      <div id="pRes"></div>
+    </section>
+
+    <!-- LIBRARY -->
+    <section class="view" id="v-lib">
+      <h1>Your <span class="grad">library</span></h1>
+      <p class="sub">Everything stays on this device. Photos are never uploaded.</p>
+      <div id="libBody"></div>
+    </section>
+  </main>
+
+  <nav class="nav" id="nav">
+    <button data-v="search" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Search</button>
+    <button data-v="clean"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21l7-7M14 4l6 6-8 8-6-6z"/><path d="M9 9l6 6"/></svg>Clean</button>
+    <button data-v="coll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>Collections</button>
+    <button data-v="pick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z"/></svg>Best of</button>
+    <button data-v="lib"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>Library</button>
+  </nav>
+</div>
+
+<div id="selbar"><span class="n" id="selN">0 selected</span>
+  <button class="btn sm" data-a="like">More like these</button>
+  <button class="btn sm" data-a="best">Best of these</button>
+  <button class="btn sm" data-a="coll">Add to collection</button>
+  <button class="btn sm" data-a="share">Share</button>
+  <button class="btn sm danger" data-a="bin">Move to bin</button>
+  <button class="btn sm" data-a="restore">Restore</button>
+  <button class="iconbtn" data-a="close" title="Done">✕</button>
+</div>
+
+<div class="ov" id="viewer"><div class="scrim" style="background:rgba(3,3,8,.94)"></div>
+  <div class="stage">
+    <div class="vtop"><button class="iconbtn" id="vClose">✕</button><div class="t" id="vTitle"></div><button class="btn sm" id="vFull">Full quality</button></div>
+    <div class="pic" id="vPic"><img id="vImg" alt=""><button class="nv l" id="vPrev">‹</button><button class="nv r" id="vNext">›</button></div>
+    <div class="vacts">
+      <button class="btn sm" id="vLike">✦ More like this</button>
+      <button class="btn sm" id="vPlus">＋ Like this, but…</button>
+      <button class="btn sm" id="vColl">Add to collection</button>
+      <button class="btn sm" id="vShare">Share</button>
+      <button class="btn sm danger" id="vBin">Move to bin</button>
+    </div>
+  </div>
+</div>
+
+<div class="ov" id="modal"><div class="scrim" id="mScrim"></div><div class="sheet" id="mBody"></div></div>
+
+<div class="ov" id="onboard">
+  <div class="ob">
+    <img class="hero" src="icon-512.png" alt="">
+    <h1>Meet <span class="grad">Iris</span></h1>
+    <p class="sub" style="font-size:17px">Search your photos by meaning, clear out duplicates and junk, and pick your best shots. All on this device, all private.</p>
+    <div class="steps">
+      <div class="step"><b>1</b><div><strong>Download the AI once</strong><p>Google's EmbeddingGemma 2 vision model, about 388 MB. Use Wi‑Fi. After that it works offline.</p></div></div>
+      <div class="step"><b>2</b><div><strong>Pick your photo folders</strong><p>Choose one parent folder like DCIM or Pictures, so Chrome asks only once. Iris only reads what you pick.</p></div></div>
+      <div class="step"><b>3</b><div><strong>Let it look at everything</strong><p>The first pass takes a while on big libraries. Keep the tablet charging with Iris open. New photos are quick after that.</p></div></div>
+    </div>
+    <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
+    <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
+    <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
+    <p class="small">Iris 1.1</p>
+  </div>
+</div>
+<input type="file" id="fModel" accept=".litertlm" class="hide">
+<input type="file" id="fPhotos" accept="image/*" multiple class="hide">
+<div class="toast" id="toast"></div>
+
+<script type="module">
+/* =========================================================
+   Iris — on-device photo search, cleanup and selection
+   EmbeddingGemma 2 (text+vision 440M) via MediaPipe tasks-retrieval
+   ========================================================= */
+const RT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-retrieval@1.2.0';
+const MODEL_URL = 'https://huggingface.co/litert-community/embeddinggemma-2-text-vision-440m-litert-lm/resolve/main/embeddinggemma-2-text-vision-440m.litertlm';
+const MODEL_MB = 388;
+const DIM = 768;
+const IMG_RE = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const SAMPLES = ['10','1015','1015b','1016','1018','1020','1024','1025','1025b','103','1035','1040','1043','1050','106','1062','1069','1074','1080','1084','129','152','164','177','200','219','225','237','237b','237c','250','26','292','306','312','325','338','364','375','42','431','433','48','493'];
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const h = (tag, attrs = {}, ...kids) => { const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) { if (k === 'class') e.className = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v); } for (const c of kids.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(c)); return e; };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmtMB = (b) => b > 1e9 ? (b / 1e9).toFixed(1) + ' GB' : (b / 1e6).toFixed(b > 1e8 ? 0 : 1) + ' MB';
+const fmtN = (n) => n.toLocaleString();
+const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.round(s) + ' s'; if (s < 5400) return Math.round(s / 60) + ' min'; return (s / 3600).toFixed(1) + ' h'; };
+let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
+
+/* ---------------- IndexedDB ---------------- */
+const DB = {
+  db: null,
+  open() { return new Promise((res, rej) => { const r = indexedDB.open('iris', 1); r.onupgradeneeded = () => { const d = r.result; for (const s of ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); }; r.onsuccess = () => { this.db = r.result; res(); }; r.onerror = () => rej(r.error); }); },
+  tx(stores, mode = 'readonly') { return this.db.transaction(stores, mode); },
+  get(store, key) { return new Promise((res, rej) => { const q = this.tx([store]).objectStore(store).get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+  put(store, key, val) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  del(store, key) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  all(store) { return new Promise((res, rej) => { const out = []; const q = this.tx([store]).objectStore(store).openCursor(); q.onsuccess = () => { const c = q.result; if (c) { out.push([c.key, c.value]); c.continue(); } else res(out); }; q.onerror = () => rej(q.error); }); },
+  saveItem(m, thumb, vec) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  removeItems(ids) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); for (const id of ids) for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+};
+
+/* ---------------- In-memory library ---------------- */
+const L = {
+  meta: new Map(),      // id -> meta
+  rows: new Map(),      // id -> row index in mat
+  ids: [],              // row -> id
+  mat: new Float32Array(DIM * 1024),
+  folders: new Map(),   // folderId -> {id,name,handle,lastScan}
+  colls: new Map(),     // id -> collection
+  session: new Map(),   // id -> File (for picked files this session)
+  add(m, vec) {
+    if (this.rows.has(m.id)) { this.meta.set(m.id, m); this.mat.set(vec, this.rows.get(m.id) * DIM); return; }
+    const r = this.ids.length;
+    if ((r + 1) * DIM > this.mat.length) { const n = new Float32Array(this.mat.length * 2); n.set(this.mat); this.mat = n; }
+    this.mat.set(vec, r * DIM); this.ids.push(m.id); this.rows.set(m.id, r); this.meta.set(m.id, m);
+  },
+  rebuild() { // compact after removals
+    const ids = this.ids.filter((id) => this.meta.has(id)); const n = new Float32Array(Math.max(1024, ids.length * 2) * DIM);
+    ids.forEach((id, i) => n.set(this.mat.subarray(this.rows.get(id) * DIM, this.rows.get(id) * DIM + DIM), i * DIM));
+    this.mat = n; this.ids = ids; this.rows = new Map(ids.map((id, i) => [id, i]));
+  },
+  vec(id) { const r = this.rows.get(id); return this.mat.subarray(r * DIM, r * DIM + DIM); },
+  get count() { return this.ids.length; },
+  live() { return this.ids.filter((id) => this.meta.get(id)?.status !== 'trash'); },
+};
+const dot = (a, b) => { let s = 0; for (let i = 0; i < DIM; i++) s += a[i] * b[i]; return s; };
+function norm(v) { let s = 0; for (let i = 0; i < v.length; i++) s += v[i] * v[i]; s = Math.sqrt(s) || 1; const o = new Float32Array(v.length); for (let i = 0; i < v.length; i++) o[i] = v[i] / s; return o; }
+function scoreAll(q, ids = L.ids) { const out = new Float32Array(ids.length); const M = L.mat; for (let k = 0; k < ids.length; k++) { const o = L.rows.get(ids[k]) * DIM; let s = 0; for (let i = 0; i < DIM; i++) s += M[o + i] * q[i]; out[k] = s; } return out; }
+function topK(ids, scores, k) { const idx = [...scores.keys()]; idx.sort((a, b) => scores[b] - scores[a]); return idx.slice(0, k).map((i) => ({ id: ids[i], s: scores[i] })); }
+function stats(arr) { let m = 0; for (const v of arr) m += v; m /= arr.length || 1; let s = 0; for (const v of arr) s += (v - m) ** 2; return { mean: m, sd: Math.sqrt(s / (arr.length || 1)) || 1e-6 }; }
+
+/* ---------------- Model ---------------- */
+const AI = {
+  mp: null, fileset: null, emb: null, state: 'off', textCache: new Map(), msPer: 0,
+  setPill(state, text) { this.state = state; $('#pdot').className = 'dot ' + ({ ok: 'ok', busy: 'busy', err: 'err' }[state] || ''); $('#ptext').textContent = text; },
+  async runtime() {
+    if (!this.mp) this.mp = await import(RT + '/retrieval_bundle.mjs');
+    if (!this.fileset) this.fileset = await this.mp.FilesetResolver.forRetrievalTasks(RT + '/wasm');
+  },
+  PART: 16 * 1024 * 1024,
+  key(i) { return 'https://iris-model.invalid/eg2-tv440/part/' + i; },
+  MAN: 'https://iris-model.invalid/eg2-tv440/manifest',
+  async manifest() { try { const c = await caches.open('iris-model-v2'); const r = await c.match(this.MAN); return r ? await r.json() : null; } catch { return null; } },
+  async cached() { return !!(await this.manifest()) || !!this.blob; },
+  async putPart(c, i, buf) { try { await c.put(this.key(i), new Response(buf, { headers: { 'content-type': 'application/octet-stream' } })); } catch (e) { throw new Error('Your browser refused to save the model (' + e.message + '). Check free storage and that this isn\u2019t an incognito tab.'); } },
+  async download() {
+    if (await this.cached()) return;
+    const c = await caches.open('iris-model-v2');
+    try { const est = await navigator.storage.estimate(); if (est.quota && est.quota - est.usage < MODEL_MB * 1.3e6) toast('Storage is tight. Free up some space if the download fails.', 5000); } catch {}
+    try { await navigator.storage.persist?.(); } catch {}
+    this.setPill('busy', 'Downloading AI 0%');
+    const getPart = async (i, total) => {
+      const a = i * this.PART, b = total ? Math.min(total, a + this.PART) - 1 : a + this.PART - 1;
+      let lastErr;
+      for (let t = 0; t < 5; t++) {
+        try { const r = await fetch(MODEL_URL, { headers: { Range: `bytes=${a}-${b}` }, cache: 'no-store' }); if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status); return r; }
+        catch (e) { lastErr = e; await sleep(1000 * (t + 1) ** 2); }
+      }
+      throw new Error('Network problem while downloading (' + (lastErr?.message || 'unknown') + '). Tap the status to resume.');
+    };
+    // first part tells us the total size and whether ranges work
+    const first = await getPart(0, 0);
+    if (first.status === 200) { // no range support: whole file in one go
+      const total = +first.headers.get('content-length') || MODEL_MB * 1e6; const reader = first.body.getReader(); const chunks = []; let got = 0;
+      for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.byteLength; const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); }
+      this.blob = new Blob(chunks); let n = 0;
+      try { for (let a = 0; a < this.blob.size; a += this.PART, n++) await this.putPart(c, n, await this.blob.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: this.blob.size, parts: n }))); this.blob = null; } catch (e) { console.warn('model kept in memory only', e); toast('Model works now but couldn\u2019t be saved, so it will download again next time.', 6000); }
+      return;
+    }
+    const total = +((first.headers.get('content-range') || '').split('/')[1]) || MODEL_MB * 1e6; const parts = Math.ceil(total / this.PART);
+    let got = 0; const tick = () => { const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); };
+    for (let i = 0; i < parts; i++) {
+      if (await c.match(this.key(i))) { got += Math.min(this.PART, total - i * this.PART); tick(); continue; } // resume
+      let buf; for (let t = 0; t < 3 && !buf; t++) { try { const r = i === 0 ? first : await getPart(i, total); buf = await r.arrayBuffer(); } catch (e) { if (t === 2) throw e; await sleep(1500); } }
+      await this.putPart(c, i, buf); got += buf.byteLength; tick();
+    }
+    await c.put(this.MAN, new Response(JSON.stringify({ total, parts })));
+  },
+  async stream() {
+    if (this.blob) return this.blob.stream().getReader();
+    const m = await this.manifest(); if (!m) throw new Error('Model not downloaded'); const c = await caches.open('iris-model-v2'); let i = 0; const self = this;
+    return new ReadableStream({ async pull(ctl) { if (i >= m.parts) return ctl.close(); const r = await c.match(self.key(i)); if (!r) { await caches.open('iris-model-v2').then((cc) => cc.delete(self.MAN)); ctl.error(new Error('Part of the model is missing. Download it again.')); return; } ctl.enqueue(new Uint8Array(await r.arrayBuffer())); i++; } }).getReader();
+  },
+  async fromFile(file) {
+    this.setPill('busy', 'Saving model…'); const c = await caches.open('iris-model-v2'); let n = 0;
+    try { for (let a = 0; a < file.size; a += this.PART, n++) await this.putPart(c, n, await file.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: file.size, parts: n }))); }
+    catch (e) { this.blob = file; toast('Using the file without saving it.', 4000); }
+    this.emb = null; this._loading = null; await this.load();
+  },
+  async load() {
+    if (this.emb) return this.emb;
+    if (this._loading) return this._loading;
+    this._loading = (async () => {
+      try {
+        if (!(await this.cached())) await this.download();
+        let adapter = null; try { adapter = await navigator.gpu?.requestAdapter(); } catch {}
+        if (!adapter) throw new Error('This browser can\u2019t reach the graphics chip (WebGPU), which the AI needs. Update Chrome, and check chrome://gpu shows WebGPU as enabled.');
+        this.setPill('busy', 'Starting AI…');
+        await this.runtime();
+        this.setPill('busy', 'Loading AI…');
+        this.emb = await this.mp.UniversalEmbedder.createFromOptions(this.fileset, { baseOptions: { modelAssetBuffer: await this.stream() }, l2Normalize: true });
+        this.setPill('ok', 'AI ready');
+        await DB.put('kv', 'modelOk', true);
+        UI.onModelReady();
+        return this.emb;
+      } catch (e) { console.error(e); if (/magic number|missing/i.test(e.message || '')) { try { await caches.delete('iris-model-v2'); await caches.delete('iris-model'); } catch {} } this.setPill('err', 'AI error: tap for details'); this.lastErr = e; this._loading = null; throw e; }
+    })();
+    return this._loading;
+  },
+  toVec(res) { const e = res?.embeddings?.[0]; if (!e) throw new Error('No embedding'); const f = e.floatEmbedding; if (!f) throw new Error('Quantized output not supported'); return norm(Float32Array.from(f)); },
+  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'txt:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = this.toVec(await this.emb.embedText(t)); this.textCache.set(t, v); DB.put('kv', 'txt:' + t, v.buffer.slice(0)); return v; },
+  async image(bytes) { await this.load(); const t0 = performance.now(); const v = this.toVec(await this.emb.embedImage(bytes)); const dt = performance.now() - t0; this.msPer = this.msPer ? this.msPer * .9 + dt * .1 : dt; return v; },
+};
+
+/* ---------------- Image analysis ---------------- */
+async function prep(file) {
+  let bmp; try { bmp = await createImageBitmap(file); } catch { return null; }
+  const W = bmp.width, H = bmp.height; const s = Math.min(1, 640 / Math.max(W, H)); const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
+  const c = new OffscreenCanvas(mw, mh); const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, mw, mh); bmp.close();
+  const bytes = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg', quality: .88 })).arrayBuffer());
+  const ts = Math.min(1, 360 / Math.max(mw, mh)); const tc = new OffscreenCanvas(Math.round(mw * ts), Math.round(mh * ts)); tc.getContext('2d').drawImage(c, 0, 0, tc.width, tc.height);
+  const thumb = await tc.convertToBlob({ type: 'image/jpeg', quality: .8 });
+  // quality metrics on 128px grayscale
+  const as = 128 / Math.max(mw, mh); const aw = Math.max(8, Math.round(mw * as)), ah = Math.max(8, Math.round(mh * as));
+  const ac = new OffscreenCanvas(aw, ah); const ax = ac.getContext('2d', { willReadFrequently: true }); ax.drawImage(c, 0, 0, aw, ah);
+  const d = ax.getImageData(0, 0, aw, ah).data; const g = new Float32Array(aw * ah); let sum = 0;
+  for (let i = 0; i < g.length; i++) { g[i] = d[i * 4] * .299 + d[i * 4 + 1] * .587 + d[i * 4 + 2] * .114; sum += g[i]; }
+  const bright = sum / g.length; let lm = 0, l2 = 0, n = 0;
+  for (let y = 1; y < ah - 1; y++) for (let xx = 1; xx < aw - 1; xx++) { const i = y * aw + xx; const l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - aw] - g[i + aw]; lm += l; l2 += l * l; n++; }
+  const sharp = n ? l2 / n - (lm / n) ** 2 : 0;
+  const hc = new OffscreenCanvas(9, 8); const hx = hc.getContext('2d', { willReadFrequently: true }); hx.drawImage(c, 0, 0, 9, 8); const hd = hx.getImageData(0, 0, 9, 8).data; let bits = '';
+  for (let y = 0; y < 8; y++) for (let xx = 0; xx < 8; xx++) { const a = (y * 9 + xx) * 4, b = a + 4; bits += (hd[a] + hd[a + 1] + hd[a + 2]) > (hd[b] + hd[b + 1] + hd[b + 2]) ? '1' : '0'; }
+  const dh = BigInt('0b' + bits).toString(16).padStart(16, '0');
+  return { bytes, thumb, w: W, h: H, bright, sharp, dh };
+}
+
+/* ---------------- Thumbnails ---------------- */
+const Thumbs = {
+  urls: new Map(), order: [],
+  async url(id) { if (this.urls.has(id)) return this.urls.get(id); const b = await DB.get('thumbs', id); if (!b) return ''; const u = URL.createObjectURL(b); this.urls.set(id, u); this.order.push(id); if (this.order.length > 1500) { const old = this.order.shift(); if (!$$(`img[data-id="${CSS.escape(old)}"]`).length) { URL.revokeObjectURL(this.urls.get(old)); this.urls.delete(old); } else this.order.push(old); } return u; },
+  io: new IntersectionObserver((ents) => { for (const e of ents) if (e.isIntersecting) { const img = e.target; Thumbs.io.unobserve(img); Thumbs.url(img.dataset.id).then((u) => { if (u) { img.onload = () => img.classList.add('ld'); img.src = u; } }); } }, { rootMargin: '600px' }),
+};
+
+/* ---------------- Grid ---------------- */
+const Sel = { on: false, set: new Set(), grid: null };
+function grid(ids, opts = {}) {
+  const wrap = h('div', { class: 'grid' + (Sel.on ? ' selmode' : '') }); const PAGE = 150; let shown = 0;
+  wrap._ids = ids; wrap._opts = opts;
+  const more = h('div', { class: 'more' });
+  const addPage = () => { const end = Math.min(ids.length, shown + PAGE); for (let i = shown; i < end; i++) wrap.append(tile(ids[i], i, ids, opts)); shown = end; if (shown >= ids.length) mio.disconnect(); };
+  const mio = new IntersectionObserver((e) => { if (e[0].isIntersecting) addPage(); }, { rootMargin: '900px' });
+  addPage(); const box = h('div', {}, wrap, more); if (shown < ids.length) mio.observe(more); return box;
+}
+function tile(id, i, list, opts) {
+  const m = L.meta.get(id); const t = h('div', { class: 'tile' + (m?.status === 'trash' && !opts.noTrashStyle ? ' trash' : '') + (Sel.set.has(id) ? ' sel' : '') + (opts.cls?.(id) || '') });
+  t.dataset.id = id; const img = h('img', { 'data-id': id, alt: '' }); t.append(img, h('i', { class: 'rm' }), h('span', { class: 'ck' })); Thumbs.io.observe(img);
+  const b = opts.badge?.(id, i); if (b) t.append(h('span', { class: 'badge' + (b.cls ? ' ' + b.cls : '') }, b.text));
+  if (opts.num) t.append(h('span', { class: 'num' }, String(i + 1)));
+  let lp, moved = false, longFired = false;
+  t.addEventListener('pointerdown', (e) => { moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (!opts.onTap) { startSel(); toggleSel(id, t); navigator.vibrate?.(15); } }, 450); });
+  t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); } });
+  t.addEventListener('pointerup', () => clearTimeout(lp)); t.addEventListener('pointercancel', () => clearTimeout(lp));
+  t.addEventListener('contextmenu', (e) => e.preventDefault());
+  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) return toggleSel(id, t); Viewer.open(list, i); });
+  return t;
+}
+function startSel() { if (Sel.on) return; Sel.on = true; $$('.grid').forEach((g) => g.classList.add('selmode')); updSel(); }
+function toggleSel(id, t) { if (Sel.set.has(id)) Sel.set.delete(id); else Sel.set.add(id); t?.classList.toggle('sel', Sel.set.has(id)); updSel(); }
+function endSel() { Sel.on = false; Sel.set.clear(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
+function updSel() { $('#selbar').classList.toggle('on', Sel.on); $('#selN').textContent = Sel.set.size + ' selected'; const anyTrash = [...Sel.set].some((id) => L.meta.get(id)?.status === 'trash'); $('#selbar [data-a=restore]').classList.toggle('hide', !anyTrash); $('#selbar [data-a=bin]').classList.toggle('hide', anyTrash && [...Sel.set].every((id) => L.meta.get(id)?.status === 'trash')); }
+
+/* ---------------- Status (bin) ---------------- */
+async function setStatus(ids, status) { for (const id of ids) { const m = L.meta.get(id); if (!m) continue; m.status = status; await DB.put('meta', id, m); } UI.binCount(); }
+
+/* ---------------- Folders & permissions ---------------- */
+const Folders = {
+  supported: 'showDirectoryPicker' in window,
+  async perm(f, mode = 'read', ask = true) { try { if ((await f.handle.queryPermission({ mode })) === 'granted') return true; if (!ask) return false; return (await f.handle.requestPermission({ mode })) === 'granted'; } catch { return false; } },
+  async add() {
+    if (!this.supported) { $('#fPhotos').click(); return; }
+    let handle; try { handle = await window.showDirectoryPicker({ id: 'iris', mode: 'read', startIn: 'pictures' }); } catch (e) { if (e.name !== 'AbortError') toast('Could not open that folder: ' + e.message); return; }
+    for (const f of L.folders.values()) { try { if (await f.handle.isSameEntry(handle)) { toast('That folder is already in Iris. Checking for new photos.'); return Indexer.scan([f]); } } catch {} }
+    const f = { id: 'f' + Date.now().toString(36), name: handle.name, handle, added: Date.now(), lastScan: 0 };
+    await DB.put('folders', f.id, f); L.folders.set(f.id, f); UI.renderLib(); Indexer.scan([f]);
+  },
+  async remove(f) {
+    const ids = L.ids.filter((id) => L.meta.get(id)?.folder === f.id); await DB.removeItems(ids); ids.forEach((id) => L.meta.delete(id)); L.rebuild();
+    await DB.del('folders', f.id); L.folders.delete(f.id); UI.refreshAll(); toast(`Removed ${f.name} from Iris. Your files are untouched.`);
+  },
+  async *walk(dir, path = []) {
+    for await (const [name, h] of dir.entries()) {
+      if (name.startsWith('.')) continue;
+      if (h.kind === 'directory') { if (/^(\.thumbnails|cache|\.trash)/i.test(name)) continue; yield* this.walk(h, [...path, name]); }
+      else if (IMG_RE.test(name)) yield { h, path, name };
+    }
+  },
+  async fileFor(id, ask = true) {
+    if (L.session.has(id)) return L.session.get(id);
+    const m = L.meta.get(id); if (!m) return null;
+    if (m.src === 'sample') { const r = await fetch('samples/' + m.name); return new File([await r.blob()], m.name, { type: 'image/jpeg' }); }
+    const f = L.folders.get(m.folder); if (!f) return null; if (!(await this.perm(f, 'read', ask))) return null;
+    try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); return await (await d.getFileHandle(m.name)).getFile(); } catch { return null; }
+  },
+};
+
+/* ---------------- Indexer ---------------- */
+const Indexer = {
+  queue: [], running: false, paused: false, done: 0, total: 0, skipped: 0, t0: 0, cur: '', wake: null,
+  async scan(folders) {
+    for (const f of folders) {
+      if (!(await Folders.perm(f, 'read', true))) { toast(`Chrome didn't allow access to ${f.name}. Tap again and choose Allow.`, 4000); continue; }
+      UI.indexStatus(`Looking through ${f.name}…`);
+      const seen = new Set(); let found = 0;
+      try {
+        for await (const e of Folders.walk(f.handle)) {
+          const file = await e.h.getFile().catch(() => null); if (!file) continue;
+          const id = `${f.id}:${e.path.join('/')}/${e.name}:${file.size}:${file.lastModified}`; seen.add(id); found++;
+          if (!L.meta.has(id)) this.queue.push({ id, getFile: async () => file, base: { id, name: e.name, path: e.path, folder: f.id, size: file.size, mtime: file.lastModified, src: 'folder' } });
+          if (found % 200 === 0) UI.indexStatus(`Looking through ${f.name}… ${fmtN(found)} photos`);
+        }
+      } catch (err) { console.error(err); toast('Stopped reading ' + f.name + ': ' + err.message); }
+      // forget photos that were deleted or edited outside Iris
+      const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
+      if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); }
+      f.lastScan = Date.now(); f.count = found; await DB.put('folders', f.id, f);
+    }
+    this.start();
+  },
+  addFiles(files, src = 'pick') {
+    for (const file of files) { if (!file.type.startsWith('image/') && !IMG_RE.test(file.name)) continue; const id = `${src}:${file.name}:${file.size}:${file.lastModified}`; if (L.meta.has(id)) continue; L.session.set(id, file); this.queue.push({ id, getFile: async () => file, base: { id, name: file.name, path: [], folder: null, size: file.size, mtime: file.lastModified, src } }); }
+    this.start();
+  },
+  async addSamples() {
+    const base = Date.UTC(2026, 5, 1, 12); let i = 0;
+    for (const s of SAMPLES) { const name = s + '.jpg'; const id = 'sample:' + name; i++; if (L.meta.has(id)) continue; const mt = base + i * 90_000; this.queue.push({ id, getFile: async () => { const r = await fetch('samples/' + name); return new File([await r.blob()], name, { type: 'image/jpeg', lastModified: mt }); }, base: { id, name, path: [], folder: null, size: 0, mtime: mt, src: 'sample' } }); }
+    this.start();
+  },
+  async start() {
+    if (this.running) { UI.renderIndex(); return; }
+    if (!this.queue.length) { UI.indexStatus(''); UI.refreshAll(); return; }
+    if (!(await ensureAI())) { UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
+    this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now();
+    try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
+    UI.renderIndex();
+    let next = this.prepNext();
+    while (this.queue.length || next) {
+      if (this.paused) { await sleep(300); continue; }
+      const job = await next; next = this.queue.length ? this.prepNext() : null;
+      if (!job) continue;
+      if (!job.p) { this.skipped++; this.done++; continue; }
+      try {
+        const vec = await AI.image(job.p.bytes);
+        const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, status: null, at: Date.now() };
+        await DB.saveItem(m, job.p.thumb, vec); L.add(m, vec); this.cur = job.base.id;
+      } catch (e) { console.error(e); this.skipped++; }
+      this.done++;
+      if (this.done % 5 === 0 || !this.queue.length) UI.renderIndex();
+      if (this.done % 60 === 0) UI.refreshLight();
+    }
+    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null;
+    Junk.cache = null; UI.renderIndex(); UI.refreshAll();
+    toast(`Done. ${fmtN(L.count)} photos ready to search.`);
+  },
+  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await prep(file); } catch (e) { console.warn(e); j.p = null; } return j; })(); },
+};
+document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && Indexer.running && !Indexer.wake) { try { Indexer.wake = await navigator.wakeLock?.request('screen'); } catch {} } });
+
+/* ---------------- Search ---------------- */
+const S = { text: '', img: null, pos: new Set(), neg: new Set(), refine: false, results: [], q: null, sort: 'rel' };
+function parseQuery(t) { const parts = (' ' + t).split(/\s-(?=\S)/); return { pos: parts[0].trim(), neg: parts.slice(1).map((s) => s.trim()).filter(Boolean) }; }
+async function queryVec(text, imgId) {
+  const acc = new Float32Array(DIM); let any = false;
+  if (imgId && L.rows.has(imgId)) { const v = L.vec(imgId); for (let i = 0; i < DIM; i++) acc[i] += v[i]; any = true; }
+  if (text) { const { pos, neg } = parseQuery(text); const w = imgId ? .9 : 1;
+    if (pos) { const v = await AI.text(pos); for (let i = 0; i < DIM; i++) acc[i] += w * v[i]; any = true; }
+    for (const n of neg) { const v = await AI.text(n); for (let i = 0; i < DIM; i++) acc[i] -= .55 * v[i]; } }
+  return any ? norm(acc) : null;
+}
+function rocchio(q, pos, neg) {
+  if (!pos.size && !neg.size) return q; const o = Float32Array.from(q);
+  const add = (set, w) => { if (!set.size) return; const m = new Float32Array(DIM); for (const id of set) { if (!L.rows.has(id)) continue; const v = L.vec(id); for (let i = 0; i < DIM; i++) m[i] += v[i] / set.size; } for (let i = 0; i < DIM; i++) o[i] += w * m[i]; };
+  add(pos, .9); add(neg, -.45); return norm(o);
+}
+let searchSeq = 0;
+async function runSearch() {
+  const seq = ++searchSeq; const text = $('#q').value.trim(); S.text = text;
+  $('#qclear').classList.toggle('hide', !text && !S.img);
+  if (!text && !S.img) { S.q = null; return renderSearch(); }
+  if (!L.count) return renderSearch();
+  if (AI.state !== 'ok' && !(text && AI.textCache.has(text))) { if (!(await ensureAI())) return; }
+  let q; try { q = await queryVec(text, S.img); } catch (e) { toast('Search failed: ' + e.message); return; }
+  if (seq !== searchSeq || !q) return;
+  q = rocchio(q, S.pos, S.neg); S.q = q;
+  const ids = L.live(); const sc = scoreAll(q, ids); const st = stats(sc);
+  let res = topK(ids, sc, 400).map((r) => ({ ...r, z: (r.s - st.mean) / st.sd }));
+  // keep strong matches; always show at least 24
+  const strong = res.filter((r, i) => i < 24 || r.z > 1.6); S.results = strong;
+  renderSearch();
+}
+let debT; $('#q').addEventListener('input', () => { clearTimeout(debT); debT = setTimeout(runSearch, 320); });
+$('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(debT); runSearch(); $('#q').blur(); } });
+$('#qclear').onclick = () => { $('#q').value = ''; S.img = null; S.pos.clear(); S.neg.clear(); S.refine = false; $('#qimg').classList.add('hide'); runSearch(); };
+function setImageQuery(id, focusText = false) { S.img = id; S.pos.clear(); S.neg.clear(); Thumbs.url(id).then((u) => { $('#qimg').src = u; $('#qimg').classList.remove('hide'); }); if (!focusText) $('#q').value = ''; $('#q').placeholder = 'Add words: "but at night", "with people"…'; go('search'); runSearch(); if (focusText) setTimeout(() => $('#q').focus(), 200); }
+
+const IDEAS = ['golden hour', 'mi perro', 'beach day', 'food', 'city at night', 'selfies', 'mountains', 'birthday party', 'screenshots', 'books and coffee', 'rainy day', 'black and white'];
+function renderSearchChips() {
+  const box = $('#schips'); box.innerHTML = '';
+  for (const c of L.colls.values()) box.append(h('button', { class: 'chip', onclick: () => openColl(c) }, '★ ' + c.name));
+  for (const t of IDEAS) box.append(h('button', { class: 'chip', onclick: () => { $('#q').value = t; S.img = null; $('#qimg').classList.add('hide'); runSearch(); } }, t));
+}
+function renderSearch() {
+  const res = $('#sres'), bar = $('#sbar'); res.innerHTML = ''; bar.innerHTML = '';
+  if (!L.count) { res.append(emptyLib()); return; }
+  if (!S.q) {
+    bar.append(h('span', {}, `${fmtN(L.live().length)} photos · newest first`));
+    const ids = L.live().sort((a, b) => L.meta.get(b).mtime - L.meta.get(a).mtime); res.append(grid(ids)); return;
+  }
+  const fb = S.pos.size + S.neg.size;
+  bar.append(h('span', {}, `${S.results.length} matches` + (fb ? ` · tuned by ${S.pos.size}👍 ${S.neg.size}👎` : '')), h('span', { class: 'sp' }),
+    h('button', { class: 'chip' + (S.refine ? ' on' : ''), onclick: () => { S.refine = !S.refine; if (S.refine) toast('Tap photos: once 👍 more like this, twice 👎 less like this.', 3500); renderSearch(); } }, S.refine ? '✓ Teaching' : '👍👎 Teach it'),
+    fb ? h('button', { class: 'chip', onclick: () => { S.pos.clear(); S.neg.clear(); runSearch(); } }, 'Reset tuning') : '',
+    h('button', { class: 'chip', onclick: () => saveCollDialog() }, '★ Save as collection'),
+    h('button', { class: 'chip', onclick: () => { Pick.preset(S.results.map((r) => r.id)); } }, '✦ Best of these'),
+    h('button', { class: 'chip', onclick: () => { startSel(); S.results.forEach((r) => Sel.set.add(r.id)); renderSearch(); updSel(); } }, 'Select all'));
+  const ids = S.results.map((r) => r.id);
+  let refT;
+  res.append(grid(ids, {
+    cls: (id) => (S.pos.has(id) ? ' up' : S.neg.has(id) ? ' down' : ''),
+    onTap: S.refine ? (id, t) => { if (S.pos.has(id)) { S.pos.delete(id); S.neg.add(id); } else if (S.neg.has(id)) S.neg.delete(id); else S.pos.add(id); t.classList.toggle('up', S.pos.has(id)); t.classList.toggle('down', S.neg.has(id)); clearTimeout(refT); refT = setTimeout(runSearch, 900); } : null,
+  }));
+}
+function emptyLib() {
+  return h('div', { class: 'empty' }, h('div', { class: 'big' }, '🖼️'), h('h2', {}, 'No photos yet'), h('p', {}, 'Add a folder from your tablet, or try 44 sample photos first.'),
+    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => Indexer.addSamples() }, 'Try sample photos')));
+}
+
+/* ---------------- Junk sweeper ---------------- */
+const Junk = {
+  cache: null,
+  groups: {
+    screens: { name: 'Screenshots', icon: '📱', p: ['a screenshot of a phone screen', 'a screenshot of an app or website', 'a screenshot of a chat conversation'] },
+    docs: { name: 'Receipts & documents', icon: '🧾', p: ['a photo of a receipt', 'a photo of a printed document or form', 'a photo of a page of text', 'a photo of a whiteboard or presentation slide'] },
+    memes: { name: 'Memes & text images', icon: '💬', p: ['a meme with captions', 'an image with large text on it', 'a forwarded greeting card image with text'] },
+    oops: { name: 'Accidental shots', icon: '🙈', p: ['an accidental photo of the floor', 'a blurry dark accidental photo taken in a pocket', 'a finger covering the camera lens'] },
+    codes: { name: 'QR codes & barcodes', icon: '🔳', p: ['a photo of a QR code', 'a barcode'] },
+  },
+  normal: ['a photo of people', 'a selfie', 'a group photo of friends', 'a family photo', 'a landscape photo', 'a photo of food', 'a photo of a pet', 'a photo of a city street', 'a photo of a building', 'a photo of the beach', 'a photo of nature', 'a photo of a car', 'a photo of the sky', 'a photo of an event', 'a photo of a room', 'a photo of a flower'],
+  async compute() {
+    if (this.cache && this.cache.n === L.count) return this.cache;
+    const ids = L.live(); const out = {}; for (const k in this.groups) out[k] = [];
+    const nv = []; for (const t of this.normal) nv.push(await AI.text(t));
+    const gv = {}; for (const [k, g] of Object.entries(this.groups)) { gv[k] = []; for (const t of g.p) gv[k].push(await AI.text(t)); }
+    const normalMax = new Float32Array(ids.length).fill(-9); for (const v of nv) { const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > normalMax[i]) normalMax[i] = s[i]; }
+    const best = new Float32Array(ids.length).fill(-9), bestK = new Array(ids.length);
+    for (const [k, vs] of Object.entries(gv)) for (const v of vs) { const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > best[i]) { best[i] = s[i]; bestK[i] = k; } }
+    for (let i = 0; i < ids.length; i++) { const margin = best[i] - normalMax[i]; if (margin > 0.005) out[bestK[i]].push({ id: ids[i], m: margin }); }
+    for (const k in out) out[k].sort((a, b) => b.m - a.m);
+    // blur and dark from pixel stats
+    const sh = ids.map((id) => L.meta.get(id).sharp).sort((a, b) => a - b); const cut = sh[Math.floor(sh.length * .06)] ?? 0;
+    out.blur = ids.filter((id) => { const m = L.meta.get(id); return m.sharp <= Math.min(cut, 60) && m.bright > 25; }).map((id) => ({ id, m: -L.meta.get(id).sharp }));
+    out.dark = ids.filter((id) => L.meta.get(id).bright < 22).map((id) => ({ id, m: -L.meta.get(id).bright }));
+    const jset = new Set(); for (const k in out) out[k].forEach((r) => jset.add(r.id));
+    this.cache = { n: L.count, out, jset }; return this.cache;
+  },
+  meta(k) { return this.groups[k] || { blur: { name: 'Blurry', icon: '🌫️' }, dark: { name: 'Too dark', icon: '🌑' } }[k]; },
+};
+
+/* ---------------- Duplicates ---------------- */
+const Dups = {
+  thr: .94, groups: null, dismissed: new Set(JSON.parse(localStorage.getItem('iris-dismissed') || '[]')),
+  quality(m, maxSharp) { const s = Math.min(1, Math.log1p(m.sharp) / Math.log1p(maxSharp || 1)); const ex = 1 - Math.abs(m.bright - 125) / 125; const res = Math.min(1, (m.w * m.h) / 12e6); return s * .6 + ex * .25 + res * .15; },
+  find() {
+    const ids = L.live().sort((a, b) => L.meta.get(a).mtime - L.meta.get(b).mtime); const n = ids.length; const par = ids.map((_, i) => i);
+    const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; }; const u = (a, b) => { a = f(a); b = f(b); if (a !== b) par[b] = a; };
+    const W = 40, M = L.mat, rows = ids.map((id) => L.rows.get(id) * DIM);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); }
+    const byHash = new Map(); ids.forEach((id, i) => { const d = L.meta.get(id).dh; if (!d) return; if (byHash.has(d)) u(byHash.get(d), i); else byHash.set(d, i); });
+    const gm = new Map(); ids.forEach((id, i) => { const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
+    const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp));
+    this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|').slice(0, 300), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id).size || 0), 0) }; })
+      .filter((g) => !this.dismissed.has(g.key)).sort((a, b) => b.ids.length - a.ids.length);
+    return this.groups;
+  },
+  dismiss(g) { this.dismissed.add(g.key); localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-5000))); },
+};
+
+/* ---------------- Collections ---------------- */
+async function collMembers(c) {
+  if (c.type === 'set') return c.ids.filter((id) => L.meta.has(id) && L.meta.get(id).status !== 'trash');
+  const q = Float32Array.from(c.vec); const ids = L.live(); if (!ids.length) return []; const sc = scoreAll(q, ids); const st = stats(sc);
+  const out = []; for (let i = 0; i < ids.length; i++) { const z = (sc[i] - st.mean) / st.sd; if (z >= c.z) out.push({ id: ids[i], s: sc[i] }); }
+  out.sort((a, b) => b.s - a.s); return out.map((r) => r.id);
+}
+async function saveCollDialog(preIds) {
+  const name = await prompt2('Name this collection', preIds ? 'e.g. Managua favorites' : (S.text || 'My collection'), preIds ? '' : (S.text || ''));
+  if (!name) return;
+  const c = { id: 'c' + Date.now().toString(36), name, at: Date.now() };
+  if (preIds) { c.type = 'set'; c.ids = [...preIds]; } else { if (!S.q) return; c.type = 'smart'; c.vec = [...S.q]; c.z = 2.0; c.text = S.text; }
+  await DB.put('colls', c.id, c); L.colls.set(c.id, c); renderSearchChips(); toast(`Saved “${name}”` + (c.type === 'smart' ? '. It updates itself as you add photos.' : '.'));
+}
+async function addToColl(ids) {
+  const sets = [...L.colls.values()].filter((c) => c.type === 'set');
+  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { c.ids = [...new Set([...c.ids, ...ids])]; await DB.put('colls', c.id, c); Modal.close(); toast(`Added ${ids.length} to ${c.name}`); } }, '★ ' + c.name)),
+    h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(); saveCollDialog(ids); } }, '+ New collection')));
+}
+const SUGGEST = [['🌅', 'Sunsets', 'a beautiful sunset or sunrise sky'], ['🍽️', 'Food', 'a plate of delicious food'], ['🐶', 'Pets', 'a dog or a cat'], ['🏖️', 'Beach', 'the beach and the ocean'], ['🌃', 'Night city', 'city lights at night'], ['🤳', 'Selfies', 'a selfie of a person'], ['⛰️', 'Nature', 'mountains, forests and nature'], ['🎉', 'Celebrations', 'a party or celebration with friends'], ['📚', 'Books & art', 'books, art and museums'], ['🚗', 'Cars', 'a car']];
+async function renderColl() {
+  const body = $('#collBody'); body.innerHTML = '';
+  if (!L.count) { body.append(emptyLib()); return; }
+  const mine = [...L.colls.values()].sort((a, b) => b.at - a.at);
+  if (mine.length) { body.append(h('h2', {}, 'Yours')); const cards = h('div', { class: 'cards' }); body.append(cards);
+    for (const c of mine) { const ids = await collMembers(c); const cover = h('div', { class: 'cover' }); if (ids[0]) Thumbs.url(ids[0]).then((u) => cover.style.backgroundImage = `url(${u})`);
+      cards.append(h('div', { class: 'card click', onclick: () => openColl(c) }, cover, h('h3', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', {}, `${fmtN(ids.length)} photos · ${c.type === 'smart' ? 'smart, updates itself' : 'hand-picked'}`))); } }
+  body.append(h('h2', {}, 'Suggested for you'), h('p', { class: 'sub' }, 'Found automatically. Tap one to explore, then save it if you like it.'));
+  const cards = h('div', { class: 'cards' }); body.append(cards);
+  if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + SUGGEST[0][2]))) { cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
+  for (const [ic, name, q] of SUGGEST) {
+    let v; try { v = await AI.text(q); } catch { continue; }
+    const ids = await collMembers({ type: 'smart', vec: v, z: 2.2 }); if (ids.length < 2) continue;
+    const mini = h('div', { class: 'mini' }); ids.slice(0, 4).forEach((id) => { const im = h('img', { alt: '' }); Thumbs.url(id).then((u) => im.src = u); mini.append(im); });
+    cards.append(h('div', { class: 'card click', onclick: () => { $('#q').value = q; S.img = null; $('#qimg').classList.add('hide'); go('search'); runSearch(); } }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos`), mini));
+  }
+}
+async function openColl(c) {
+  const ids = await collMembers(c);
+  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { c.z = +e.target.value; await DB.put('colls', c.id, c); openColl(c); } })) : '';
+  Modal.open(h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
+    h('div', { class: 'bar' }, h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); } }, 'Delete collection')),
+    grid(ids)), true);
+}
+$('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); };
+
+/* ---------------- Best-of picker ---------------- */
+const Pick = {
+  preset(ids) { this.pre = ids; go('pick'); renderPickSrc(); $('#pSrc').value = 'pre'; toast(`${ids.length} photos ready. Tap “Pick the best”.`); },
+  async run() {
+    const src = $('#pSrc').value; let ids;
+    if (src === 'all') ids = L.live(); else if (src === 'pre') ids = this.pre || []; else if (src.startsWith('f:')) ids = L.live().filter((id) => L.meta.get(id).folder === src.slice(2)); else if (src.startsWith('c:')) ids = await collMembers(L.colls.get(src.slice(2)));
+    const from = $('#pFrom').value, to = $('#pTo').value;
+    if (from) { const t = new Date(from + '-01').getTime(); ids = ids.filter((id) => L.meta.get(id).mtime >= t); }
+    if (to) { const d = new Date(to + '-01'); d.setMonth(d.getMonth() + 1); ids = ids.filter((id) => L.meta.get(id).mtime < d.getTime()); }
+    if (Junk.cache) ids = ids.filter((id) => !Junk.cache.jset.has(id));
+    if (!ids.length) return toast('No photos match those settings.');
+    const K = +$('#pK').value, variety = +$('#pV').value / 100;
+    let rel = null; const qt = $('#pQ').value.trim();
+    if (qt) { if (!(await ensureAI())) return; const qv = await queryVec(qt); const sc = scoreAll(qv, ids); const st = stats(sc); rel = Array.from(sc, (s) => 1 / (1 + Math.exp(-(s - st.mean) / st.sd * 1.5))); }
+    const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp));
+    let base = ids.map((id, i) => { const q = Dups.quality(L.meta.get(id), maxSharp); return rel ? .55 * rel[i] + .45 * q : q; });
+    let cand = ids.map((id, i) => ({ id, b: base[i] })); if (cand.length > 4000) { cand.sort((a, b) => b.b - a.b); cand = cand.slice(0, 4000); }
+    const maxSim = new Float32Array(cand.length).fill(0); const chosen = []; const used = new Uint8Array(cand.length); const M = L.mat;
+    for (let k = 0; k < Math.min(K, cand.length); k++) {
+      let bi = -1, bv = -1e9; for (let i = 0; i < cand.length; i++) { if (used[i]) continue; const v = cand[i].b - variety * 1.6 * Math.max(0, maxSim[i] - .35); if (v > bv) { bv = v; bi = i; } }
+      if (bi < 0) break; used[bi] = 1; chosen.push(cand[bi].id); const o = L.rows.get(cand[bi].id) * DIM;
+      for (let i = 0; i < cand.length; i++) { if (used[i]) continue; const p = L.rows.get(cand[i].id) * DIM; let s = 0; for (let d = 0; d < DIM; d++) s += M[o + d] * M[p + d]; if (s > maxSim[i]) maxSim[i] = s; }
+      if (k % 10 === 9) await sleep(0);
+    }
+    const res = $('#pRes'); res.innerHTML = '';
+    res.append(h('div', { class: 'bar' }, h('span', {}, `Your best ${chosen.length} from ${fmtN(ids.length)} photos`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => saveCollDialog(chosen) }, '★ Save as collection'), h('button', { class: 'btn sm', onclick: () => shareIds(chosen) }, 'Share all')), grid(chosen, { num: true }));
+    res.scrollIntoView({ behavior: 'smooth' });
+  },
+};
+function renderPickSrc() {
+  const s = $('#pSrc'), cur = s.value; s.innerHTML = '';
+  if (Pick.pre) s.append(h('option', { value: 'pre' }, `Selected photos (${Pick.pre.length})`));
+  s.append(h('option', { value: 'all' }, `All photos (${fmtN(L.live().length)})`));
+  for (const c of L.colls.values()) s.append(h('option', { value: 'c:' + c.id }, 'Collection: ' + c.name));
+  for (const f of L.folders.values()) s.append(h('option', { value: 'f:' + f.id }, 'Folder: ' + f.name));
+  if ([...s.options].some((o) => o.value === cur)) s.value = cur;
+}
+$('#pK').oninput = (e) => $('#pKv').textContent = e.target.value;
+$('#pV').oninput = (e) => $('#pVv').textContent = +e.target.value < 25 ? 'Low' : +e.target.value < 60 ? 'Medium' : 'High';
+$('#pGo').onclick = () => { if (!L.count) return toast('Add some photos first.'); Pick.run(); };
+
+/* ---------------- Sharing & deleting ---------------- */
+async function shareIds(ids) {
+  if (!navigator.share) return toast('Sharing is not supported in this browser.');
+  ids = ids.slice(0, 60); const files = [];
+  for (const id of ids) { const f = await Folders.fileFor(id, true); if (f) files.push(f); }
+  if (!files.length) return toast('Could not open the original files. Reconnect the folder in Library.');
+  try { if (navigator.canShare && !navigator.canShare({ files })) return toast('These files can’t be shared from here.'); await navigator.share({ files }); } catch (e) { if (e.name !== 'AbortError') toast('Share failed: ' + e.message); }
+}
+async function deleteFromDevice(ids) {
+  const byF = new Map(); const local = [];
+  for (const id of ids) { const m = L.meta.get(id); if (m?.folder && L.folders.has(m.folder)) { if (!byF.has(m.folder)) byF.set(m.folder, []); byF.get(m.folder).push(m); } else local.push(id); }
+  let ok = 0, fail = 0; const removed = [...local];
+  for (const [fid, ms] of byF) { const f = L.folders.get(fid);
+    if (!(await Folders.perm(f, 'readwrite', true))) { fail += ms.length; continue; }
+    for (const m of ms) { try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
+  await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Dups.groups = null;
+  UI.refreshAll(); toast(fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (Chrome or Android refused).` : `Deleted ${ok} photos from your device.` + (local.length ? ` Removed ${local.length} from Iris.` : ''), 4500);
+}
+
+/* ---------------- Viewer ---------------- */
+const Viewer = {
+  list: [], i: 0, fullUrl: null,
+  open(list, i) { this.list = list; this.i = i; $('#viewer').classList.add('on'); this.show(); },
+  close() { $('#viewer').classList.remove('on'); if (this.fullUrl) URL.revokeObjectURL(this.fullUrl); this.fullUrl = null; },
+  async show() {
+    const id = this.list[this.i]; const m = L.meta.get(id); if (!m) return;
+    if (this.fullUrl) { URL.revokeObjectURL(this.fullUrl); this.fullUrl = null; }
+    $('#vImg').src = await Thumbs.url(id);
+    const d = new Date(m.mtime); $('#vTitle').textContent = `${m.name} · ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })} · ${m.w}×${m.h}` + (m.size ? ' · ' + fmtMB(m.size) : '');
+    $('#vBin').textContent = m.status === 'trash' ? 'Restore' : 'Move to bin'; $('#vBin').classList.toggle('danger', m.status !== 'trash');
+    $('#vPrev').style.visibility = this.i > 0 ? 'visible' : 'hidden'; $('#vNext').style.visibility = this.i < this.list.length - 1 ? 'visible' : 'hidden';
+    const f = await Folders.fileFor(id, false); $('#vFull').classList.toggle('hide', !!f);
+    if (f && this.list[this.i] === id) { this.fullUrl = URL.createObjectURL(f); $('#vImg').src = this.fullUrl; }
+  },
+  step(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.show(); },
+};
+$('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.step(-1); $('#vNext').onclick = () => Viewer.step(1);
+$('#vFull').onclick = async () => { const id = Viewer.list[Viewer.i]; const f = await Folders.fileFor(id, true); if (!f) return toast('Couldn’t open the original.'); Viewer.fullUrl = URL.createObjectURL(f); $('#vImg').src = Viewer.fullUrl; $('#vFull').classList.add('hide'); };
+$('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id); };
+$('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id, true); };
+$('#vColl').onclick = () => addToColl([Viewer.list[Viewer.i]]);
+$('#vShare').onclick = () => shareIds([Viewer.list[Viewer.i]]);
+$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); await setStatus([id], m.status === 'trash' ? null : 'trash'); toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.show(); };
+let sx = null; $('#vPic').addEventListener('pointerdown', (e) => sx = e.clientX); $('#vPic').addEventListener('pointerup', (e) => { if (sx != null && Math.abs(e.clientX - sx) > 60) Viewer.step(e.clientX < sx ? 1 : -1); sx = null; });
+document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
+
+/* ---------------- Modal ---------------- */
+const Modal = { open(content, wide) { const b = $('#mBody'); b.innerHTML = ''; b.style.width = wide ? 'min(1100px,100%)' : ''; b.append(content); $('#modal').classList.add('on'); }, close() { $('#modal').classList.remove('on'); } };
+$('#mScrim').onclick = () => Modal.close();
+function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { Modal.close(); res(v); };
+  Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))));
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); }); setTimeout(() => inp.focus(), 80); }); }
+function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { Modal.close(); res(v); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText)))); }); }
+
+/* ---------------- Selection bar ---------------- */
+$('#selbar').addEventListener('click', async (e) => {
+  const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set];
+  if (a === 'close') return endSel();
+  if (!ids.length) return toast('Select some photos first.');
+  if (a === 'bin') { await setStatus(ids, 'trash'); endSel(); UI.refreshLight(); toast(`Moved ${ids.length} to the bin`); }
+  if (a === 'restore') { await setStatus(ids, null); endSel(); UI.refreshLight(); renderClean(); toast(`Restored ${ids.length}`); }
+  if (a === 'coll') addToColl(ids);
+  if (a === 'share') shareIds(ids);
+  if (a === 'best') { endSel(); Pick.preset(ids); }
+  if (a === 'like') { if (!(await ensureAI())) return; endSel(); S.pos = new Set(ids); S.neg.clear(); S.img = null; $('#qimg').classList.add('hide'); const acc = new Float32Array(DIM); ids.forEach((id) => { const v = L.vec(id); for (let i = 0; i < DIM; i++) acc[i] += v[i]; }); $('#q').value = ''; go('search'); S.q = norm(acc); const all = L.live(); const sc = scoreAll(S.q, all); const st = stats(sc); S.results = topK(all, sc, 400).map((r) => ({ ...r, z: (r.s - st.mean) / st.sd })).filter((r, i) => i < 24 || r.z > 1.6); S.text = '(like your selection)'; renderSearch(); }
+});
+
+/* ---------------- Clean view ---------------- */
+let cTab = 'dup';
+$('#cseg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; cTab = b.dataset.t; $$('#cseg button').forEach((x) => x.classList.toggle('on', x === b)); renderClean(); });
+async function renderClean() {
+  const body = $('#cbody'); body.innerHTML = ''; UI.binCount();
+  if (!L.count) { body.append(emptyLib()); return; }
+  if (cTab === 'dup') {
+    const groups = Dups.groups || Dups.find(); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.size, 0);
+    body.append(h('div', { class: 'card', style: 'margin-bottom:14px' },
+      h('div', { class: 'rowf', style: 'align-items:flex-end' }, h('div', {}, h('div', { class: 'cnt' }, fmtN(groups.length), h('span', { class: 'small' }, ' groups')), h('p', {}, `${fmtN(total)} extra copies` + (bytes ? ` · ${fmtMB(bytes)} to free` : ''))),
+        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, 'Match closeness: ', h('b', {}, Math.round(Dups.thr * 100) + '%')), h('input', { type: 'range', min: '86', max: '99', value: String(Math.round(Dups.thr * 100)), onchange: (e) => { Dups.thr = e.target.value / 100; Dups.groups = null; renderClean(); } }))),
+      groups.length ? h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' }, h('button', { class: 'btn pri', onclick: async () => { const ids = groups.flatMap((g) => g.ids.slice(1)); if (await confirm2('Keep the best of every group?', `${ids.length} photos go to the bin. You can review and restore them before anything is deleted.`, 'Move to bin')) { await setStatus(ids, 'trash'); Dups.groups = null; renderClean(); toast(`${ids.length} moved to the bin`); } } }, '★ Keep best in all groups')) : ''));
+    if (!groups.length) body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '✨'), h('p', {}, 'No duplicates at this setting.')));
+    const list = h('div'); body.append(list); let shown = 0;
+    const addG = () => { for (const g of groups.slice(shown, shown + 30)) {
+      const marks = new Set(g.ids.slice(1)); const row = h('div', { class: 'row' });
+      const gEl = h('div', { class: 'group' }, h('div', { class: 'gh' }, h('span', {}, `${g.ids.length} similar · ${new Date(L.meta.get(g.best).mtime).toLocaleDateString()}`), h('span', { class: 'sp' }),
+        h('button', { class: 'btn sm', onclick: () => { Dups.dismiss(g); gEl.remove(); } }, 'Keep all'),
+        h('button', { class: 'btn sm pri', onclick: async () => { await setStatus([...marks], 'trash'); Dups.dismiss(g); gEl.style.opacity = .3; setTimeout(() => gEl.remove(), 250); toast(`${marks.size} moved to the bin`); } }, 'Keep ★ only')), row);
+      g.ids.forEach((id, i) => { const t = tile(id, i, g.ids, { badge: (x) => (x === g.best ? { text: '★ Best', cls: 'best' } : null), onTap: (x, el) => { if (marks.has(x)) marks.delete(x); else marks.add(x); el.classList.toggle('mark', marks.has(x)); } }); if (marks.has(id)) t.classList.add('mark'); row.append(t); });
+      list.append(gEl); } shown += 30; if (shown < groups.length) list.append(h('button', { class: 'btn', style: 'width:100%', onclick: (e) => { e.target.remove(); addG(); } }, 'Show more groups')); };
+    addG(); body.append(h('p', { class: 'small' }, 'Tip: tap a photo in a group to switch whether it goes to the bin. ★ marks the sharpest, best-lit shot.'));
+  }
+  if (cTab === 'junk') {
+    if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + Junk.normal[0]))) { body.append(h('div', { class: 'card' }, h('p', {}, 'The AI needs to be loaded to sort junk.'), h('button', { class: 'btn pri sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderClean(); } }, 'Load AI'))); return; }
+    body.append(h('p', { class: 'sub' }, 'Sorting…'));
+    const { out } = await Junk.compute(); body.innerHTML = '';
+    const cards = h('div', { class: 'cards' }); body.append(cards);
+    for (const k of [...Object.keys(Junk.groups), 'blur', 'dark']) { const arr = out[k] || []; const gm = Junk.meta(k);
+      const mini = h('div', { class: 'mini' }); arr.slice(0, 4).forEach((r) => { const im = h('img', { alt: '' }); Thumbs.url(r.id).then((u) => im.src = u); mini.append(im); }); for (let i = arr.length; i < 4; i++) mini.append(h('div'));
+      cards.append(h('div', { class: 'card click', onclick: () => arr.length && openJunk(k, arr.map((r) => r.id)) }, h('h3', {}, gm.icon + ' ' + gm.name), h('div', { class: 'cnt' }, fmtN(arr.length)), mini)); }
+    body.append(h('p', { class: 'small', style: 'margin-top:14px' }, 'These are AI guesses. Open a group, untick anything you want to keep, then move the rest to the bin.'));
+  }
+  if (cTab === 'bin') {
+    const ids = L.ids.filter((id) => L.meta.get(id)?.status === 'trash'); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
+    body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin')), h('p', {}, bytes ? fmtMB(bytes) + ' can be freed' : 'Nothing will be deleted until you say so.'),
+      ids.length ? h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn', onclick: async () => { await setStatus(ids, null); renderClean(); toast('Restored everything'); } }, 'Restore all'),
+        h('button', { class: 'btn danger', onclick: async () => { if (await confirm2(`Delete ${ids.length} photos from this device?`, 'This removes the files from your folders and can’t be undone here. Chrome will ask for permission to edit the folder: choose Allow.', 'Delete forever', true)) deleteFromDevice(ids); } }, 'Delete from device')) : ''));
+    if (ids.length) body.append(grid(ids, { noTrashStyle: true })); else body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty.')));
+  }
+}
+function openJunk(k, ids) {
+  const keep = new Set(); const gm = Junk.meta(k);
+  Modal.open(h('div', {}, h('h2', {}, gm.icon + ' ' + gm.name), h('p', { class: 'sub' }, 'Everything marked ✕ goes to the bin. Tap a photo to keep it.'),
+    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id)); await setStatus(go2, 'trash'); Junk.cache = null; Modal.close(); renderClean(); toast(`${go2.length} moved to the bin`); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Cancel')),
+    grid(ids, { cls: () => ' mark', onTap: (id, t) => { if (keep.has(id)) keep.delete(id); else keep.add(id); t.classList.toggle('mark', !keep.has(id)); } })), true);
+}
+
+/* ---------------- Library view ---------------- */
+async function renderLib() {
+  const b = $('#libBody'); b.innerHTML = '';
+  const idx = h('div', { id: 'idxCard' }); b.append(idx); UI.renderIndex();
+  const folders = h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Folders'));
+  if (!L.folders.size) folders.append(h('p', {}, Folders.supported ? 'No folders yet. Pick one parent folder like DCIM or Pictures so Chrome only asks once.' : 'This browser can’t open folders, so add photos directly instead.'));
+  for (const f of L.folders.values()) { const n = L.ids.filter((id) => L.meta.get(id)?.folder === f.id).length;
+    folders.append(h('div', { class: 'kv', style: 'align-items:center;gap:8px' }, h('span', {}, '📁 ' + f.name), h('span', { style: 'display:flex;gap:6px;align-items:center' }, h('span', { class: 'small' }, fmtN(n) + ' photos'), h('button', { class: 'btn sm', onclick: () => Indexer.scan([f]) }, 'Check for new'), h('button', { class: 'btn sm', onclick: async () => { if (await confirm2(`Remove ${f.name}?`, 'Iris forgets these photos. Your files stay exactly where they are.', 'Remove')) Folders.remove(f); } }, '✕')))); }
+  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), h('button', { class: 'btn sm', onclick: () => Indexer.addSamples() }, 'Add sample photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
+  b.append(folders);
+  let est = {}; try { est = await navigator.storage.estimate(); } catch {}
+  const cached = await AI.cached();
+  b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'AI model'),
+    h('div', { class: 'kv' }, h('span', {}, 'Model'), h('span', {}, 'EmbeddingGemma 2 · text + vision 440M')),
+    h('div', { class: 'kv' }, h('span', {}, 'Status'), h('span', {}, AI.state === 'ok' ? 'Running' : cached ? 'Downloaded, not loaded' : 'Not downloaded')),
+    h('div', { class: 'kv' }, h('span', {}, 'Speed'), h('span', {}, AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : '—')),
+    h('div', { class: 'kv' }, h('span', {}, 'Storage used'), h('span', {}, est.usage ? fmtMB(est.usage) : '—')),
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, AI.state !== 'ok' ? h('button', { class: 'btn pri sm', onclick: () => ensureAI() }, cached ? 'Load AI' : `Download AI (${MODEL_MB} MB)`) : '', h('button', { class: 'btn sm', onclick: () => $('#fModel').click() }, 'Load model from file'),
+      cached ? h('button', { class: 'btn sm', onclick: async () => { if (await confirm2('Delete the downloaded AI?', 'You’ll need to download it again to search or add photos.', 'Delete', true)) { await caches.delete('iris-model-v2'); toast('Model deleted'); renderLib(); } } }, 'Delete model') : '')));
+  b.append(h('div', { class: 'card' }, h('h3', {}, 'Library'),
+    h('div', { class: 'kv' }, h('span', {}, 'Photos understood'), h('span', {}, fmtN(L.count))),
+    h('div', { class: 'kv' }, h('span', {}, 'In the bin'), h('span', {}, fmtN(L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length))),
+    h('div', { class: 'kv' }, h('span', {}, 'Collections'), h('span', {}, fmtN(L.colls.size))),
+    h('p', { class: 'small', style: 'margin-top:10px' }, 'Tips: search in any language, like “mi perro en la playa”. Add a minus to exclude: “beach -people”. Long-press a photo to select several.'),
+    h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections and folder links. Your photos are not touched.', 'Erase', true)) { await DB.clear(); location.reload(); } } }, 'Erase index'))));
+}
+
+/* ---------------- UI glue ---------------- */
+const UI = {
+  onModelReady() { if ($('#v-coll').classList.contains('on')) renderColl(); },
+  onModelProgress(p, got, total) { const el = $('#obGo'); if (el) el.textContent = `Downloading… ${p}% (${fmtMB(got)} of ${fmtMB(total)})`; },
+  indexStatus(t) { this._st = t; this.renderIndex(); },
+  renderIndex() {
+    const card = $('#idxCard'); const ban = $('#sbanner');
+    const I = Indexer; const left = I.total - I.done; const el = (performance.now() - I.t0) / 1000; const rate = I.done / Math.max(el, .001); const eta = left / Math.max(rate, 1e-6);
+    const html = () => { const c = h('div', { class: 'card', style: 'margin-bottom:14px' });
+      if (I.running) { const img = h('img', { alt: '' }); if (I.cur) Thumbs.url(I.cur).then((u) => img.src = u);
+        c.append(h('div', { class: 'idx' }, img, h('div', { class: 'meta' }, h('strong', {}, I.paused ? 'Paused' : 'Understanding your photos…'), h('p', { class: 'small' }, `${fmtN(I.done)} of ${fmtN(I.total)} · about ${fmtDur(eta)} left` + (I.skipped ? ` · ${I.skipped} skipped` : '')), h('div', { class: 'progress', style: 'margin-top:8px' }, h('div', { style: `width:${(I.done / Math.max(1, I.total) * 100).toFixed(1)}%` }))),
+          h('button', { class: 'btn sm', onclick: () => { I.paused = !I.paused; UI.renderIndex(); } }, I.paused ? 'Resume' : 'Pause')));
+        c.append(h('p', { class: 'small', style: 'margin-top:8px' }, 'Keep Iris open and the tablet charging. The screen stays on while this runs.')); }
+      else if (this._st) c.append(h('p', {}, this._st));
+      else return null; return c; };
+    if (card) { card.innerHTML = ''; const c = html(); if (c) card.append(c); }
+    if (ban) { ban.innerHTML = ''; if (I.running) ban.append(h('div', { class: 'banner' }, h('span', {}, `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}, about ${fmtDur(eta)} left`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
+      else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
+      else if (L.folders.size && [...L.folders.values()].some((f) => Date.now() - (f.lastScan || 0) > 864e5)) ban.append(h('div', { class: 'banner' }, h('span', {}, 'New photos since last time?'), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check now'))); }
+  },
+  binCount() { const n = L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length; $('#binN').textContent = n ? `(${n})` : ''; },
+  refreshLight() { if (cur === 'search' && !S.q) renderSearch(); this.binCount(); },
+  refreshAll() { Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); this.binCount(); },
+};
+UI.renderLib = renderLib;
+async function ensureAI() {
+  if (AI.state === 'ok') return true;
+  const cached = await AI.cached();
+  if (!cached && !(await confirm2('Download the AI?', `Iris needs Google’s EmbeddingGemma 2 model, about ${MODEL_MB} MB, once. Use Wi‑Fi. After that it works offline.`, 'Download'))) return false;
+  try { await AI.load(); return true; } catch (e) { toast('AI failed to start: ' + e.message, 5000); UI.renderIndex(); return false; }
+}
+
+let cur = 'search';
+function go(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v)); $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); $('#main').scrollTop = 0;
+  if (v === 'search') { if (!S.q) renderSearch(); } if (v === 'clean') renderClean(); if (v === 'coll') renderColl(); if (v === 'pick') renderPickSrc(); if (v === 'lib') renderLib(); }
+$('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
+$('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
+$('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
+$('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
+
+/* ---------------- Onboarding ---------------- */
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.1): ' + e.message, 6000); } };
+function askFolder() {
+  Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
+    h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
+}
+$('#obFile').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#fModel').click(); };
+$('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); };
+
+/* ---------------- Boot ---------------- */
+(async function boot() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  caches.delete('iris-model').catch(() => {});
+  await DB.open();
+  const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
+  for (const [id, buf] of vecs) { const m = metas.get(id); if (m) L.add(m, new Float32Array(buf)); }
+  for (const [id, f] of await DB.all('folders')) L.folders.set(id, f);
+  for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
+  renderSearchChips(); renderSearch(); renderPickSrc(); UI.binCount(); UI.renderIndex();
+  const rot = ['Describe a photo…', 'golden hour at the beach', 'mi perro durmiendo', 'birthday cake with candles', 'old books on a table', 'beach -people'];
+  let ri = 0; setInterval(() => { if (!S.img && document.activeElement !== $('#q')) $('#q').placeholder = rot[ri++ % rot.length]; }, 3500);
+  if (!localStorage.getItem('iris-ob') && !L.count) $('#onboard').classList.add('on');
+  if (await AI.cached()) { AI.setPill('busy', 'Starting AI…'); AI.load().catch(() => UI.renderIndex()); } else AI.setPill('', L.count ? 'AI not downloaded' : 'AI not loaded');
+})();
+</script>
+</body>
+</html>
