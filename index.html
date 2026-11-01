@@ -283,7 +283,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.0</p>
+    <p class="small">Iris 2.1</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.0';
+const VER = 'Iris 2.1';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -472,7 +472,7 @@ const AI = {
     });
   },
   toVec(res) { const e = res?.embeddings?.[0]; if (!e) throw new Error('No embedding'); const f = e.floatEmbedding; if (!f) throw new Error('Quantized output not supported'); return norm(Float32Array.from(f)); },
-  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'txt:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = norm(await this.emb.text(t)); this.textCache.set(t, v); DB.put('kv', 'txt:' + t, v.buffer.slice(0)); return v; },
+  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'q2:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = norm(await this.emb.text('task: search result | query: ' + t)); this.textCache.set(t, v); DB.put('kv', 'q2:' + t, v.buffer.slice(0)); return v; },
   async image(bytes) { await this.load(); const t0 = performance.now(); const v = norm(await this.emb.image(bytes)); const dt = performance.now() - t0; this.msPer = this.msPer ? this.msPer * .9 + dt * .1 : dt; return v; },
 };
 
@@ -831,7 +831,7 @@ async function renderColl() {
       cards.append(h('div', { class: 'card click', onclick: () => openColl(c) }, cover, h('h3', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', {}, `${fmtN(ids.length)} photos · ${c.type === 'smart' ? 'smart, updates itself' : 'hand-picked'}`))); } }
   body.append(h('h2', {}, 'Suggested for you'), h('p', { class: 'sub' }, 'Found automatically. Tap one to explore, then save it if you like it.'));
   const cards = h('div', { class: 'cards' }); body.append(cards);
-  if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + SUGGEST[SUGGEST.length - 1][2]))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
+  if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + SUGGEST[SUGGEST.length - 1][2]))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
   if (!Sugg.cache || Sugg.cache.n !== L.count) { const list = []; for (const [ic, name, q] of SUGGEST) { let v; try { v = await AI.text(q); } catch { continue; } await sleep(0); list.push({ ic, name, q, ids: await collMembers({ type: 'smart', vec: v, z: 2.2 }) }); } Sugg.cache = { n: L.count, list }; }
   if (tok !== RT_.coll) return;
   for (const { ic, name, q, ids } of Sugg.cache.list) {
@@ -990,7 +990,7 @@ async function renderClean() {
     addG(); body.append(h('p', { class: 'small' }, 'Tip: tap a photo in a group to switch whether it goes to the bin. ★ marks the sharpest, best-lit shot.'));
   }
   if (cTab === 'junk') {
-    if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + Junk.normal[0]))) { body.append(h('div', { class: 'card' }, h('p', {}, 'The AI needs to be loaded to sort junk.'), h('button', { class: 'btn pri sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderClean(); } }, 'Load AI'))); return; }
+    if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + Junk.normal[0]))) { body.append(h('div', { class: 'card' }, h('p', {}, 'The AI needs to be loaded to sort junk.'), h('button', { class: 'btn pri sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderClean(); } }, 'Load AI'))); return; }
     body.append(h('p', { class: 'sub' }, 'Sorting…'));
     const { out: raw } = await Junk.compute(); if (tok !== RT_.clean) return; body.innerHTML = '';
     const out = {}; for (const k in raw) out[k] = raw[k].filter((r) => L.meta.get(r.id)?.status !== 'trash');
@@ -1093,7 +1093,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.0): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.1): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
