@@ -296,7 +296,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.15</p>
+    <p class="small">Iris 2.16</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -329,7 +329,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.15';
+const VER = 'Iris 2.16';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -554,7 +554,7 @@ const Thumbs = {
 const Sel = { on: false, set: new Set(), grid: null };
 function grid(ids, opts = {}) {
   const wrap = h('div', { class: 'grid' + (Sel.on ? ' selmode' : '') }); const PAGE = 150; let shown = 0;
-  wrap._ids = ids; wrap._opts = opts;
+  wrap._ids = ids; wrap._opts = opts; wrap.addEventListener('touchmove', dragTouch, { passive: false });
   const more = h('div', { class: 'more' });
   const addPage = () => { const end = Math.min(ids.length, shown + PAGE); for (let i = shown; i < end; i++) wrap.append(tile(ids[i], i, ids, opts)); shown = end; if (shown >= ids.length) mio.disconnect(); };
   const mio = new IntersectionObserver((e) => { if (e[0].isIntersecting) addPage(); }, { rootMargin: '900px' });
@@ -562,20 +562,49 @@ function grid(ids, opts = {}) {
 }
 function tile(id, i, list, opts) {
   const m = L.meta.get(id); const t = h('div', { class: 'tile' + (m?.status === 'trash' && !opts.noTrashStyle ? ' trash' : '') + (Sel.set.has(id) ? ' sel' : '') + (opts.cls?.(id) || '') });
-  t.dataset.id = id; const img = h('img', { 'data-id': id, alt: '', draggable: 'false', decoding: 'async' }); t.append(img, h('i', { class: 'rm' }), h('span', { class: 'ck' })); Thumbs.io.observe(img);
+  t.dataset.id = id; t._i = i; t._list = list; const img = h('img', { 'data-id': id, alt: '', draggable: 'false', decoding: 'async' }); t.append(img, h('i', { class: 'rm' }), h('span', { class: 'ck' })); Thumbs.io.observe(img);
   const b = opts.badge?.(id, i); if (b) t.append(h('span', { class: 'badge' + (b.cls ? ' ' + b.cls : '') }, b.text));
   if (opts.num) t.append(h('span', { class: 'num' }, String(i + 1)));
   let lp, moved = false, longFired = false;
-  t.addEventListener('pointerdown', (e) => { moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (!opts.onTap) { startSel(); toggleSel(id, t); navigator.vibrate?.(15); } }, 450); });
+  t.addEventListener('pointerdown', (e) => { moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); });
   t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); } });
   t.addEventListener('pointerup', () => clearTimeout(lp)); t.addEventListener('pointercancel', () => clearTimeout(lp));
   t.addEventListener('contextmenu', (e) => e.preventDefault());
-  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) return toggleSel(id, t); Viewer.open(list, i); });
+  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) { Sel.anchor = { list, i }; return toggleSel(id, t); } Viewer.open(list, i); });
   return t;
 }
+/* Smart selection: long-press then drag paints a range (auto-scrolls at the edges);
+   in selection mode, long-press another photo selects everything between it and the last one touched. */
+const Drag = { on: false };
+function longSel(id, i, list, t) {
+  const a = Sel.anchor;
+  if (Sel.on && a && a.list === list && a.i !== i) { const [lo, hi] = a.i < i ? [a.i, i] : [i, a.i]; for (let k = lo; k <= hi; k++) Sel.set.add(list[k]); paintSel(list); updSel(); toast(`Selected ${fmtN(hi - lo + 1)} in a row`); }
+  else { startSel(); toggleSel(id, t); }
+  Sel.anchor = { list, i };
+  Object.assign(Drag, { on: true, list, start: i, cur: i, base: new Set(Sel.set), add: Sel.set.has(id), x: 0, y: 0 });
+  if (!localStorage.getItem('iris.selTip')) { localStorage.setItem('iris.selTip', '1'); setTimeout(() => toast('Tip: keep holding and drag to select many. Long-press another photo to select everything in between.', 5000), 600); }
+}
+function paintSel(list) { $$('.view.on .tile, #modal .tile').forEach((t) => { if (!list || t._list === list) t.classList.toggle('sel', Sel.set.has(t.dataset.id)); }); }
+function dragTo(x, y) {
+  Drag.x = x; Drag.y = y; const el = document.elementFromPoint(x, y)?.closest('.tile'); if (!el || el._list !== Drag.list || el._i === Drag.cur) return;
+  const prev = Drag.cur; Drag.cur = el._i; const L_ = Drag.list;
+  const lo = Math.min(Drag.start, prev, Drag.cur), hi = Math.max(Drag.start, prev, Drag.cur), a = Math.min(Drag.start, Drag.cur), b = Math.max(Drag.start, Drag.cur);
+  for (let k = lo; k <= hi; k++) { const id = L_[k]; const inR = k >= a && k <= b; const want = inR ? Drag.add : Drag.base.has(id); if (want) Sel.set.add(id); else Sel.set.delete(id); }
+  Sel.anchor = { list: L_, i: Drag.cur }; paintSel(L_); updSel();
+}
+function dragEnd() { Drag.on = false; cancelAnimationFrame(Drag.raf); Drag.raf = 0; }
+function dragAuto() {
+  if (!Drag.on) return; const m = $('#main'), r = m.getBoundingClientRect(), bottom = Math.min(r.bottom, $('#selbar').getBoundingClientRect().top || r.bottom);
+  const v = Drag.y < r.top + 70 ? -Math.min(24, (r.top + 70 - Drag.y) / 2) : Drag.y > bottom - 70 ? Math.min(24, (Drag.y - bottom + 70) / 2) : 0;
+  if (v) { m.scrollTop += v; dragTo(Drag.x, Drag.y); } Drag.raf = requestAnimationFrame(dragAuto);
+}
+// attached to each grid only, so scrolling elsewhere never waits on this
+const dragTouch = (e) => { if (!Drag.on) return; e.preventDefault(); const p = e.touches[0]; dragTo(p.clientX, p.clientY); if (!Drag.raf) Drag.raf = requestAnimationFrame(dragAuto); };
+document.addEventListener('pointermove', (e) => { if (!Drag.on || e.pointerType === 'touch') return; dragTo(e.clientX, e.clientY); if (!Drag.raf) Drag.raf = requestAnimationFrame(dragAuto); });
+for (const ev of ['touchend', 'touchcancel', 'pointerup', 'pointercancel']) document.addEventListener(ev, (e) => { if (Drag.on && !(ev.startsWith('pointer') && e.pointerType === 'touch' && ev === 'pointercancel')) dragEnd(); });
 function startSel() { if (Sel.on) return; Sel.on = true; $$('.grid').forEach((g) => g.classList.add('selmode')); updSel(); }
 function toggleSel(id, t) { if (Sel.set.has(id)) Sel.set.delete(id); else Sel.set.add(id); t?.classList.toggle('sel', Sel.set.has(id)); updSel(); }
-function endSel() { Sel.on = false; Sel.set.clear(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
+function endSel() { Sel.on = false; Sel.set.clear(); Sel.anchor = null; dragEnd(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
 function updSel() { $('#selbar').classList.toggle('on', Sel.on); $('#selN').textContent = Sel.set.size + ' selected';
   const inBin = cur === 'bin' || (Sel.set.size > 0 && [...Sel.set].every((id) => L.meta.get(id)?.status === 'trash'));
   for (const a of ['like', 'best', 'coll', 'bin']) $(`#selbar [data-a=${a}]`).classList.toggle('hide', inBin);
@@ -1209,7 +1238,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.15): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.16): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
