@@ -280,7 +280,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 1.3</p>
+    <p class="small">Iris 1.4</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -420,9 +420,15 @@ const AI = {
         let adapter = null; try { adapter = await navigator.gpu?.requestAdapter(); } catch {}
         if (!adapter) throw new Error('This browser can\u2019t reach the graphics chip (WebGPU), which the AI needs. Update Chrome, and check chrome://gpu shows WebGPU as enabled.');
         this.setPill('busy', 'Starting AI…');
-        await this.runtime();
-        this.setPill('busy', 'Loading AI…');
-        this.emb = await this.mp.UniversalEmbedder.createFromOptions(this.fileset, { baseOptions: { modelAssetBuffer: await this.stream() }, l2Normalize: true });
+        try { this.emb = await this.startWorker(); }
+        catch (we) { // worker failed: run on the page instead (may feel slower)
+          console.warn('AI worker failed, using main thread', we);
+          this.worker?.terminate(); this.worker = null;
+          await this.runtime(); this.setPill('busy', 'Loading AI…');
+          const m = await this.mp.UniversalEmbedder.createFromOptions(this.fileset, { baseOptions: { modelAssetBuffer: await this.stream() }, l2Normalize: true });
+          const raw = (res) => Float32Array.from(res.embeddings[0].floatEmbedding);
+          this.emb = { text: async (t) => raw(await m.embedText(t)), image: async (b) => raw(await m.embedImage(b)) };
+        }
         this.setPill('ok', 'AI ready');
         await DB.put('kv', 'modelOk', true);
         UI.onModelReady();
@@ -431,9 +437,18 @@ const AI = {
     })();
     return this._loading;
   },
+  startWorker() {
+    return new Promise((resolve, reject) => {
+      const w = new Worker('ai-worker.js', { type: 'module' }); this.worker = w; const pend = new Map(); let seq = 0;
+      const call = (op, arg, transfer = []) => new Promise((res, rej) => { const id = ++seq; pend.set(id, { res, rej }); w.postMessage({ id, op, arg }, transfer); });
+      w.onmessage = ({ data }) => { if (data.progress != null) { this.setPill('busy', `Loading AI ${data.progress}%`); return; } const p = pend.get(data.id); if (!p) return; pend.delete(data.id); data.ok ? p.res(data.r) : p.rej(new Error(data.err)); };
+      w.onerror = (e) => { e.preventDefault?.(); for (const p of pend.values()) p.rej(new Error(e.message || 'AI worker crashed')); pend.clear(); reject(new Error(e.message || 'AI worker failed')); };
+      call('init', this.blob || null).then(() => resolve({ text: (t) => call('text', t), image: (b) => call('image', b, [b.buffer]) }), reject);
+    });
+  },
   toVec(res) { const e = res?.embeddings?.[0]; if (!e) throw new Error('No embedding'); const f = e.floatEmbedding; if (!f) throw new Error('Quantized output not supported'); return norm(Float32Array.from(f)); },
-  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'txt:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = this.toVec(await this.emb.embedText(t)); this.textCache.set(t, v); DB.put('kv', 'txt:' + t, v.buffer.slice(0)); return v; },
-  async image(bytes) { await this.load(); const t0 = performance.now(); const v = this.toVec(await this.emb.embedImage(bytes)); const dt = performance.now() - t0; this.msPer = this.msPer ? this.msPer * .9 + dt * .1 : dt; return v; },
+  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'txt:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = norm(await this.emb.text(t)); this.textCache.set(t, v); DB.put('kv', 'txt:' + t, v.buffer.slice(0)); return v; },
+  async image(bytes) { await this.load(); const t0 = performance.now(); const v = norm(await this.emb.image(bytes)); const dt = performance.now() - t0; this.msPer = this.msPer ? this.msPer * .9 + dt * .1 : dt; return v; },
 };
 
 /* ---------------- Image analysis ---------------- */
@@ -991,7 +1006,7 @@ $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.val
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.3): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.4): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
