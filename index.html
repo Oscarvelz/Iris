@@ -296,7 +296,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.14</p>
+    <p class="small">Iris 2.15</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -329,7 +329,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.14';
+const VER = 'Iris 2.15';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -610,20 +610,28 @@ const Folders = {
     f.handle = nh; f.name = nh.name; await DB.put('folders', f.id, f); return true;
   },
   // One sheet, before a scan starts, for every folder that lost access. Nothing pops up once reading has begun.
+  // Ask for all folders at once: the requests go out together inside one tap.
+  async requestAll(list) { const r = await Promise.all(list.map((f) => f.handle.requestPermission({ mode: 'read' }).then((x) => x === 'granted', () => false)));
+    Log.add('info', 'allow all', list.map((f, i) => f.name + ':' + (r[i] ? 'ok' : 'no')).join(' ')); return list.filter((f, i) => r[i]); },
   reconnectAll(need) {
     return new Promise((res) => {
       const ok = new Set(); let settled = false;
       const finish = () => { if (settled) return; settled = true; Modal.close(); res(ok); };
-      const startBtn = h('button', { class: 'btn pri', onclick: finish }, 'Start');
-      const sync = () => { const left = need.length - ok.size; startBtn.textContent = left ? (ok.size ? `Start without ${left}` : 'Skip') : 'Start'; if (!left) setTimeout(finish, 350); };
-      const rows = need.map((f) => { const b = h('button', { class: 'btn sm pri' }, 'Allow');
+      const skipBtn = h('button', { class: 'btn', onclick: finish }, 'Skip');
+      const mark = (f, b) => { ok.add(f); b.textContent = '✓'; b.disabled = true; };
+      const sync = () => { const left = need.length - ok.size; skipBtn.textContent = ok.size ? `Start without ${left}` : 'Skip'; allBtn.classList.toggle('hide', left === 0);
+        hint.classList.toggle('hide', !tried || !left); if (!left) setTimeout(finish, 350); };
+      let tried = false; const btns = new Map();
+      const rows = need.map((f) => { const b = h('button', { class: 'btn sm' }, 'Allow'); btns.set(f, b);
         b.onclick = async () => { if (ok.has(f)) return; let g = false; try { g = (await f.handle.requestPermission({ mode: 'read' })) === 'granted'; } catch {}
-          if (!g) g = await this.repick(f, 'read'); Log.add('info', 'reconnect', f.name, g ? 'ok' : 'no');
-          if (g) { ok.add(f); b.textContent = '✓'; b.className = 'btn sm'; b.disabled = true; } sync(); };
-        return h('div', { class: 'kv', style: 'align-items:center;padding:10px 0' }, h('span', {}, '📁 ' + f.name), b); });
-      Modal.open(h('div', {}, h('h2', {}, need.length === 1 ? 'Allow ' + need[0].name : `Allow ${need.length} folders`),
-        h('p', { class: 'sub' }, 'Android forgets folder access whenever Iris closes. Tap Allow on each folder once and Iris reads them all without stopping again.'),
-        h('div', {}, ...rows), h('div', { class: 'acts' }, startBtn)), false, finish);
+          if (!g) g = await this.repick(f, 'read'); Log.add('info', 'reconnect', f.name, g ? 'ok' : 'no'); if (g) mark(f, b); sync(); };
+        return h('div', { class: 'kv', style: 'align-items:center;padding:8px 0' }, h('span', {}, '📁 ' + f.name), b); });
+      const allBtn = h('button', { class: 'btn pri', style: 'width:100%;margin:14px 0 4px' }, need.length === 1 ? 'Allow' : `Allow all ${need.length}`);
+      allBtn.onclick = async () => { const left = need.filter((f) => !ok.has(f)); const got = await this.requestAll(left); got.forEach((f) => mark(f, btns.get(f))); tried = true; sync(); };
+      const hint = h('p', { class: 'small hide', style: 'margin-top:8px' }, 'Android wouldn’t allow the rest in one go. Tap Allow next to each one and pick that folder again.');
+      Modal.open(h('div', {}, h('h2', {}, need.length === 1 ? 'Allow ' + need[0].name : `Allow your ${need.length} folders`),
+        h('p', { class: 'sub' }, 'Android forgets folder access whenever Iris closes. One tap gives it back to all of them.'),
+        allBtn, hint, h('div', {}, ...rows), h('div', { class: 'acts' }, skipBtn)), false, finish);
       sync();
     });
   },
@@ -684,6 +692,8 @@ const Indexer = {
     if (busy.length) toast(busy.map((f) => f === this.curF ? `Already checking ${f.name}: ${fmtN(this.found)} photos found so far.` : `${f.name} is already in line, right after ${this.scanning}.`).join(' '), 4000);
     folders = folders.filter((f) => !busy.includes(f)); if (!folders.length) return;
     const need = []; for (const f of folders) if (!(await Folders.perm(f, 'read', false))) need.push(f);
+    if (need.length) await Folders.requestAll(need); // the tap that started this still counts, so ask for every folder in one go
+    for (let i = need.length - 1; i >= 0; i--) if (await Folders.perm(need[i], 'read', false)) need.splice(i, 1);
     if (need.length) { const got = await Folders.reconnectAll(need); folders = folders.filter((f) => !need.includes(f) || got.has(f)); if (!folders.length) return; }
     const add = folders.filter((f) => !(this.later || []).includes(f)); this.later = [...(this.later || []), ...add];
     if (this.scanning) { if (add.length) toast(add.map((f) => f.name).join(', ') + ' will be read right after ' + this.scanning + '.', 4500); return; }
@@ -1199,7 +1209,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.14): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.15): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
