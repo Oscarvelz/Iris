@@ -33,11 +33,11 @@ header{display:flex;align-items:center;gap:12px;padding:14px 18px 10px;position:
 .dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
 .dot.ok{background:var(--ok);box-shadow:0 0 10px var(--ok)} .dot.busy{background:var(--warn);animation:pulse 1s infinite} .dot.err{background:var(--bad)}
 @keyframes pulse{50%{opacity:.35}}
-main{overflow:auto;position:relative;padding:0 18px calc(110px + var(--safe-b));scroll-behavior:smooth}
+main{overflow:auto;position:relative;padding:0 18px calc(110px + var(--safe-b));overscroll-behavior:contain}
 .view{display:none;max-width:1500px;margin:0 auto;animation:fade .25s ease}
 .view.on{display:block}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}}
-.nav{display:flex;justify-content:space-around;gap:4px;padding:8px 6px calc(8px + var(--safe-b));background:rgba(9,9,16,.92);backdrop-filter:blur(18px);border-top:1px solid var(--line);z-index:5}
+.nav{display:flex;justify-content:space-around;gap:4px;padding:8px 6px calc(8px + var(--safe-b));background:#0a0a12;touch-action:manipulation;border-top:1px solid var(--line);z-index:5}
 .nav button{display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 10px;border-radius:14px;color:var(--dim);font-size:11.5px;min-width:62px;transition:.2s}
 .nav button svg{width:24px;height:24px}
 .nav button.on{color:var(--text);background:var(--card2)}
@@ -73,8 +73,10 @@ h2{font-size:19px;margin:22px 0 10px;letter-spacing:-.2px}
 .tile{position:relative;aspect-ratio:1;border-radius:12px;overflow:hidden;background:var(--bg2);cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 .tile img{width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .3s,transform .25s}
 .tile img.ld{opacity:1}
-.tile:hover img{transform:scale(1.04)}
-.tile .badge{position:absolute;left:6px;top:6px;padding:2px 7px;border-radius:8px;font-size:11px;font-weight:700;background:rgba(0,0,0,.6);backdrop-filter:blur(6px)}
+@media(hover:hover){.tile:hover img{transform:scale(1.04)}}
+button,.tile,.chip{touch-action:manipulation}
+.grid{content-visibility:auto}
+.tile .badge{position:absolute;left:6px;top:6px;padding:2px 7px;border-radius:8px;font-size:11px;font-weight:700;background:rgba(0,0,0,.7)}
 .tile .badge.best{background:linear-gradient(120deg,#ffcf5a,#ff8a3d);color:#1a1000}
 .tile .num{position:absolute;right:6px;bottom:6px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:800;background:var(--grad)}
 .tile .ck{position:absolute;right:7px;top:7px;width:24px;height:24px;border-radius:50%;border:2px solid rgba(255,255,255,.85);background:rgba(0,0,0,.25);display:none;place-items:center}
@@ -126,7 +128,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 /* overlays */
 .ov{position:fixed;inset:0;z-index:20;display:none}
 .ov.on{display:block}
-.scrim{position:absolute;inset:0;background:rgba(3,3,8,.72);backdrop-filter:blur(8px);animation:fade .2s}
+.scrim{position:absolute;inset:0;background:rgba(3,3,8,.82);animation:fade .2s}
 .sheet{position:absolute;left:50%;bottom:0;transform:translateX(-50%);width:min(620px,100%);max-height:88%;overflow:auto;background:#11111c;border:1px solid var(--line);border-radius:26px 26px 0 0;padding:22px 20px calc(22px + var(--safe-b));animation:up .28s cubic-bezier(.2,.9,.3,1)}
 @media(min-width:700px){.sheet{bottom:auto;top:50%;transform:translate(-50%,-50%);border-radius:26px;animation:fade .2s}}
 @keyframes up{from{transform:translate(-50%,40%)}}
@@ -280,7 +282,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 1.4</p>
+    <p class="small">Iris 1.5</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -451,7 +453,12 @@ const AI = {
   async image(bytes) { await this.load(); const t0 = performance.now(); const v = norm(await this.emb.image(bytes)); const dt = performance.now() - t0; this.msPer = this.msPer ? this.msPer * .9 + dt * .1 : dt; return v; },
 };
 
-/* ---------------- Image analysis ---------------- */
+/* ---------------- Image analysis (in background workers) ---------------- */
+const Prep = {
+  pool: [], ok: true, seq: 0, pend: new Map(), rr: 0,
+  init() { if (this.pool.length || !this.ok) return; try { const n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < n; k++) { const w = new Worker('prep-worker.js'); w.onmessage = ({ data }) => { const p = this.pend.get(data.id); if (p) { this.pend.delete(data.id); p(data.p); } }; w.onerror = () => { this.ok = false; for (const p of this.pend.values()) p(undefined); this.pend.clear(); }; this.pool.push(w); } } catch { this.ok = false; } },
+  async run(file) { this.init(); if (!this.ok || !this.pool.length) return prep(file); const id = ++this.seq; const r = await new Promise((res) => { this.pend.set(id, res); this.pool[this.rr++ % this.pool.length].postMessage({ id, file }); }); return r === undefined ? prep(file) : r; },
+};
 async function prep(file) {
   let bmp; try { bmp = await createImageBitmap(file); } catch { return null; }
   const W = bmp.width, H = bmp.height; const s = Math.min(1, 640 / Math.max(W, H)); const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
@@ -492,7 +499,7 @@ function grid(ids, opts = {}) {
 }
 function tile(id, i, list, opts) {
   const m = L.meta.get(id); const t = h('div', { class: 'tile' + (m?.status === 'trash' && !opts.noTrashStyle ? ' trash' : '') + (Sel.set.has(id) ? ' sel' : '') + (opts.cls?.(id) || '') });
-  t.dataset.id = id; const img = h('img', { 'data-id': id, alt: '' }); t.append(img, h('i', { class: 'rm' }), h('span', { class: 'ck' })); Thumbs.io.observe(img);
+  t.dataset.id = id; const img = h('img', { 'data-id': id, alt: '', draggable: 'false', decoding: 'async' }); t.append(img, h('i', { class: 'rm' }), h('span', { class: 'ck' })); Thumbs.io.observe(img);
   const b = opts.badge?.(id, i); if (b) t.append(h('span', { class: 'badge' + (b.cls ? ' ' + b.cls : '') }, b.text));
   if (opts.num) t.append(h('span', { class: 'num' }, String(i + 1)));
   let lp, moved = false, longFired = false;
@@ -515,13 +522,22 @@ async function setStatus(ids, status) { for (const id of ids) { const m = L.meta
 const Folders = {
   supported: 'showDirectoryPicker' in window,
   async perm(f, mode = 'read', ask = true) {
-    try { if ((await f.handle.queryPermission({ mode })) === 'granted') return true; } catch { return false; }
+    try { if ((await f.handle.queryPermission({ mode })) === 'granted') return true; } catch {}
     if (!ask) return false;
-    try { return (await f.handle.requestPermission({ mode })) === 'granted'; }
-    catch { // no recent tap: Chrome needs a fresh one, so ask with a button
-      return new Promise((res) => { Modal.open(h('div', {}, h('h2', {}, 'Allow ' + f.name + '?'), h('p', { class: 'sub' }, mode === 'readwrite' ? 'Chrome needs your OK to delete files in this folder.' : 'Chrome asks once each time Iris opens. Tap Allow, then Allow again in Chrome’s box.'),
-        h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); res(false); } }, 'Skip'), h('button', { class: 'btn pri', onclick: async () => { Modal.close(); try { res((await f.handle.requestPermission({ mode })) === 'granted'); } catch { res(false); } } }, 'Allow')))); });
-    }
+    try { if ((await f.handle.requestPermission({ mode })) === 'granted') return true; } catch {}
+    // Android Chrome often can't re-open a saved folder: ask the user to pick it again (one tap).
+    return new Promise((res) => {
+      const finish = (v) => { Modal.close(); res(v); };
+      Modal.open(h('div', {}, h('h2', {}, '📁 Reconnect ' + f.name),
+        h('p', { class: 'sub' }, `Chrome forgets folder access when Iris closes. Tap Open, then “Use this folder” on ${f.name}` + (mode === 'readwrite' ? ', and Allow editing so Iris can delete.' : '.')),
+        h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => finish(false) }, 'Not now'),
+          h('button', { class: 'btn pri', onclick: async () => {
+            let nh; try { nh = await window.showDirectoryPicker({ id: 'iris', mode, startIn: f.handle }); } catch (e) { if (e.name !== 'AbortError') toast('Couldn’t open the picker: ' + e.message); return finish(false); }
+            let same = false; try { same = await nh.isSameEntry(f.handle); } catch {}
+            if (!same && nh.name !== f.name) { if (!(await confirm2('Different folder', `You picked “${nh.name}” instead of “${f.name}”. Use it in place of ${f.name}?`, 'Use it'))) return res(false); }
+            f.handle = nh; f.name = nh.name; await DB.put('folders', f.id, f); finish(true);
+          } }, 'Open ' + f.name))), false, () => res(false));
+    });
   },
   async add() {
     if (!this.supported) { $('#fPhotos').click(); return; }
@@ -566,7 +582,7 @@ const Indexer = {
           const file = await e.h.getFile().catch(() => null); if (!file) continue;
           const id = `${f.id}:${e.path.join('/')}/${e.name}:${file.size}:${file.lastModified}`; seen.add(id); found++;
           if (!L.meta.has(id)) this.queue.push({ id, getFile: async () => file, base: { id, name: e.name, path: e.path, folder: f.id, size: file.size, mtime: file.lastModified, src: 'folder' } });
-          if (found % 200 === 0) UI.indexStatus(`Looking through ${f.name}… ${fmtN(found)} photos`);
+          if (found % 200 === 0) { UI.indexStatus(`Looking through ${f.name}… ${fmtN(found)} photos`); await sleep(0); }
         }
       } catch (err) { console.error(err); toast('Stopped reading ' + f.name + ': ' + err.message); }
       // forget photos that were deleted or edited outside Iris
@@ -574,16 +590,17 @@ const Indexer = {
       if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); }
       f.lastScan = Date.now(); f.count = found; await DB.put('folders', f.id, f);
     }
-    this.start();
+    this.grow(); this.start();
   },
+  grow() { if (this.running) this.total = this.done + this.queue.length + 1; },
   addFiles(files, src = 'pick') {
     for (const file of files) { if (!file.type.startsWith('image/') && !IMG_RE.test(file.name)) continue; const id = `${src}:${file.name}:${file.size}:${file.lastModified}`; if (L.meta.has(id)) continue; L.session.set(id, file); this.queue.push({ id, getFile: async () => file, base: { id, name: file.name, path: [], folder: null, size: file.size, mtime: file.lastModified, src } }); }
-    this.start();
+    this.grow(); this.start();
   },
   async addSamples() {
     const base = Date.UTC(2026, 5, 1, 12); let i = 0;
     for (const s of SAMPLES) { const name = s + '.jpg'; const id = 'sample:' + name; i++; if (L.meta.has(id)) continue; const mt = base + i * 90_000; this.queue.push({ id, getFile: async () => { const r = await fetch('samples/' + name); return new File([await r.blob()], name, { type: 'image/jpeg', lastModified: mt }); }, base: { id, name, path: [], folder: null, size: 0, mtime: mt, src: 'sample' } }); }
-    this.start();
+    this.grow(); this.start();
   },
   async start() {
     if (this.running) { UI.renderIndex(); return; }
@@ -607,11 +624,11 @@ const Indexer = {
       if (this.done % 5 === 0 || !this.queue.length) UI.renderIndex();
       if (this.done % 60 === 0) UI.refreshLight();
     }
-    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null;
-    Junk.cache = null; UI.renderIndex(); UI.refreshAll();
+    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; UI._st = '';
+    Junk.cache = null; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
     toast(`Done. ${fmtN(L.count)} photos ready to search.`);
   },
-  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await prep(file); } catch (e) { console.warn(e); j.p = null; } return j; })(); },
+  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file); } catch (e) { console.warn(e); j.p = null; } return j; })(); },
 };
 document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && Indexer.running && !Indexer.wake) { try { Indexer.wake = await navigator.wakeLock?.request('screen'); } catch {} } });
 
@@ -637,7 +654,8 @@ async function runSearch() {
   $('#qclear').classList.toggle('hide', !text && !S.img);
   if (!text && !S.img) { S.q = null; return renderSearch(); }
   if (!L.count) return renderSearch();
-  if (AI.state !== 'ok' && !(text && AI.textCache.has(text))) { if (!(await ensureAI())) return; }
+  if (AI.state !== 'ok' && !(text && AI.textCache.has(text))) { $('#sbar').textContent = AI.state === 'busy' ? 'Waiting for the AI to finish loading…' : ''; if (!(await ensureAI())) return; }
+  if (!AI.textCache.has(text)) $('#sbar').textContent = 'Searching…';
   let q; try { q = await queryVec(text, S.img); } catch (e) { toast('Search failed: ' + e.message); return; }
   if (seq !== searchSeq || !q) return;
   q = rocchio(q, S.pos, S.neg); S.q = q;
@@ -700,9 +718,9 @@ const Junk = {
     const ids = L.live(); const out = {}; for (const k in this.groups) out[k] = [];
     const nv = []; for (const t of this.normal) nv.push(await AI.text(t));
     const gv = {}; for (const [k, g] of Object.entries(this.groups)) { gv[k] = []; for (const t of g.p) gv[k].push(await AI.text(t)); }
-    const normalMax = new Float32Array(ids.length).fill(-9); for (const v of nv) { const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > normalMax[i]) normalMax[i] = s[i]; }
+    const normalMax = new Float32Array(ids.length).fill(-9); for (const v of nv) { await sleep(0); const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > normalMax[i]) normalMax[i] = s[i]; }
     const best = new Float32Array(ids.length).fill(-9), bestK = new Array(ids.length);
-    for (const [k, vs] of Object.entries(gv)) for (const v of vs) { const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > best[i]) { best[i] = s[i]; bestK[i] = k; } }
+    for (const [k, vs] of Object.entries(gv)) for (const v of vs) { await sleep(0); const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > best[i]) { best[i] = s[i]; bestK[i] = k; } }
     for (let i = 0; i < ids.length; i++) { const margin = best[i] - normalMax[i]; if (margin > 0.005) out[bestK[i]].push({ id: ids[i], m: margin }); }
     for (const k in out) out[k].sort((a, b) => b.m - a.m);
     // blur and dark from pixel stats
@@ -719,14 +737,14 @@ const Junk = {
 const Dups = {
   thr: .94, groups: null, dismissed: new Set(JSON.parse(localStorage.getItem('iris-dismissed') || '[]')),
   quality(m, maxSharp) { const s = Math.min(1, Math.log1p(m.sharp) / Math.log1p(maxSharp || 1)); const ex = 1 - Math.abs(m.bright - 125) / 125; const res = Math.min(1, (m.w * m.h) / 12e6); return s * .6 + ex * .25 + res * .15; },
-  find() {
+  async find() {
     const ids = L.live().sort((a, b) => L.meta.get(a).mtime - L.meta.get(b).mtime); const n = ids.length; const par = ids.map((_, i) => i);
     const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; }; const u = (a, b) => { a = f(a); b = f(b); if (a !== b) par[b] = a; };
     const W = 40, M = L.mat, rows = ids.map((id) => L.rows.get(id) * DIM);
-    for (let i = 0; i < n; i++) for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); }
+    for (let i = 0; i < n; i++) { for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); } if (i % 400 === 399) await sleep(0); }
     const byHash = new Map(); ids.forEach((id, i) => { const d = L.meta.get(id).dh; if (!d) return; if (byHash.has(d)) u(byHash.get(d), i); else byHash.set(d, i); });
     const gm = new Map(); ids.forEach((id, i) => { const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
-    const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp));
+    let maxSharp = 1; for (const id of ids) maxSharp = Math.max(maxSharp, L.meta.get(id).sharp);
     this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|').slice(0, 300), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id).size || 0), 0) }; })
       .filter((g) => !this.dismissed.has(g.key)).sort((a, b) => b.ids.length - a.ids.length);
     return this.groups;
@@ -754,19 +772,22 @@ async function addToColl(ids) {
     h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(); saveCollDialog(ids); } }, '+ New collection')));
 }
 const SUGGEST = [['🌅', 'Sunsets', 'a beautiful sunset or sunrise sky'], ['🍽️', 'Food', 'a plate of delicious food'], ['🐶', 'Pets', 'a dog or a cat'], ['🏖️', 'Beach', 'the beach and the ocean'], ['🌃', 'Night city', 'city lights at night'], ['🤳', 'Selfies', 'a selfie of a person'], ['⛰️', 'Nature', 'mountains, forests and nature'], ['🎉', 'Celebrations', 'a party or celebration with friends'], ['📚', 'Books & art', 'books, art and museums'], ['🚗', 'Cars', 'a car']];
+const Sugg = { cache: null };
 async function renderColl() {
-  const body = $('#collBody'); body.innerHTML = '';
+  const tok = ++RT_.coll; const body = $('#collBody'); body.innerHTML = '';
   if (!L.count) { body.append(emptyLib()); return; }
   const mine = [...L.colls.values()].sort((a, b) => b.at - a.at);
+  if (tok !== RT_.coll) return;
   if (mine.length) { body.append(h('h2', {}, 'Yours')); const cards = h('div', { class: 'cards' }); body.append(cards);
     for (const c of mine) { const ids = await collMembers(c); const cover = h('div', { class: 'cover' }); if (ids[0]) Thumbs.url(ids[0]).then((u) => cover.style.backgroundImage = `url(${u})`);
       cards.append(h('div', { class: 'card click', onclick: () => openColl(c) }, cover, h('h3', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', {}, `${fmtN(ids.length)} photos · ${c.type === 'smart' ? 'smart, updates itself' : 'hand-picked'}`))); } }
   body.append(h('h2', {}, 'Suggested for you'), h('p', { class: 'sub' }, 'Found automatically. Tap one to explore, then save it if you like it.'));
   const cards = h('div', { class: 'cards' }); body.append(cards);
-  if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + SUGGEST[0][2]))) { cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
-  for (const [ic, name, q] of SUGGEST) {
-    let v; try { v = await AI.text(q); } catch { continue; }
-    const ids = await collMembers({ type: 'smart', vec: v, z: 2.2 }); if (ids.length < 2) continue;
+  if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + SUGGEST[SUGGEST.length - 1][2]))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
+  if (!Sugg.cache || Sugg.cache.n !== L.count) { const list = []; for (const [ic, name, q] of SUGGEST) { let v; try { v = await AI.text(q); } catch { continue; } await sleep(0); list.push({ ic, name, q, ids: await collMembers({ type: 'smart', vec: v, z: 2.2 }) }); } Sugg.cache = { n: L.count, list }; }
+  if (tok !== RT_.coll) return;
+  for (const { ic, name, q, ids } of Sugg.cache.list) {
+    if (ids.length < 2) continue;
     const mini = h('div', { class: 'mini' }); ids.slice(0, 4).forEach((id) => { const im = h('img', { alt: '' }); Thumbs.url(id).then((u) => im.src = u); mini.append(im); });
     cards.append(h('div', { class: 'card click', onclick: () => { $('#q').value = q; S.img = null; $('#qimg').classList.add('hide'); go('search'); runSearch(); } }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos`), mini));
   }
@@ -867,13 +888,20 @@ $('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L
 let sx = null; $('#vPic').addEventListener('pointerdown', (e) => sx = e.clientX); $('#vPic').addEventListener('pointerup', (e) => { if (sx != null && Math.abs(e.clientX - sx) > 60) Viewer.step(e.clientX < sx ? 1 : -1); sx = null; });
 document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
 
+/* ---------------- Back button ---------------- */
+const Back = {
+  push() { history.pushState({ iris: 1 }, ''); },
+  handler() { if ($('#viewer').classList.contains('on')) { Viewer.close(true); return true; } if ($('#modal').classList.contains('on')) { Modal.close(true); return true; } if (Sel.on) { endSel(); return true; } if (cur !== 'search') { go('search'); return true; } return false; },
+};
+history.replaceState({ iris: 0 }, ''); history.pushState({ iris: 1 }, '');
+addEventListener('popstate', () => { if (Back.handler()) history.pushState({ iris: 1 }, ''); });
 /* ---------------- Modal ---------------- */
-const Modal = { open(content, wide) { const b = $('#mBody'); b.innerHTML = ''; b.style.width = wide ? 'min(1100px,100%)' : ''; b.append(content); $('#modal').classList.add('on'); }, close() { $('#modal').classList.remove('on'); } };
-$('#mScrim').onclick = () => Modal.close();
+const Modal = { _cancel: null, open(content, wide, onCancel) { this._cancel = onCancel || null; const b = $('#mBody'); b.innerHTML = ''; b.style.width = wide ? 'min(1100px,100%)' : ''; b.append(content); $('#modal').classList.add('on'); }, close(cancel) { const c = this._cancel; this._cancel = null; $('#modal').classList.remove('on'); if (cancel && c) c(); } };
+$('#mScrim').onclick = () => Modal.close(true);
 function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { Modal.close(); res(v); };
-  Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))));
+  Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))), false, () => res(null));
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); }); setTimeout(() => inp.focus(), 80); }); }
-function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { Modal.close(); res(v); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText)))); }); }
+function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { Modal.close(); res(v); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => res(false)); }); }
 
 /* ---------------- Selection bar ---------------- */
 $('#selbar').addEventListener('click', async (e) => {
@@ -889,17 +917,18 @@ $('#selbar').addEventListener('click', async (e) => {
 });
 
 /* ---------------- Clean view ---------------- */
-let cTab = 'dup';
+let cTab = 'dup'; const RT_ = { clean: 0, coll: 0 };
 $('#cseg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; cTab = b.dataset.t; $$('#cseg button').forEach((x) => x.classList.toggle('on', x === b)); renderClean(); });
 async function renderClean() {
-  const body = $('#cbody'); body.innerHTML = ''; UI.binCount();
+  const tok = ++RT_.clean; const body = $('#cbody'); body.innerHTML = ''; UI.binCount();
   if (!L.count) { body.append(emptyLib()); return; }
   if (cTab === 'dup') {
-    const groups = Dups.groups || Dups.find(); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.size, 0);
+    if (!Dups.groups) { body.append(h('p', { class: 'sub' }, 'Looking for duplicates…')); await sleep(30); await Dups.find(); if (tok !== RT_.clean) return; body.innerHTML = ''; }
+    const groups = Dups.groups.map((g) => ({ ...g, ids: g.ids.filter((id) => L.meta.get(id)?.status !== 'trash') })).filter((g) => g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.size, 0);
     body.append(h('div', { class: 'card', style: 'margin-bottom:14px' },
       h('div', { class: 'rowf', style: 'align-items:flex-end' }, h('div', {}, h('div', { class: 'cnt' }, fmtN(groups.length), h('span', { class: 'small' }, ' groups')), h('p', {}, `${fmtN(total)} extra copies` + (bytes ? ` · ${fmtMB(bytes)} to free` : ''))),
         h('div', { class: 'field', style: 'margin:0' }, h('label', {}, 'Match closeness: ', h('b', {}, Math.round(Dups.thr * 100) + '%')), h('input', { type: 'range', min: '86', max: '99', value: String(Math.round(Dups.thr * 100)), onchange: (e) => { Dups.thr = e.target.value / 100; Dups.groups = null; renderClean(); } }))),
-      groups.length ? h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' }, h('button', { class: 'btn pri', onclick: async () => { const ids = groups.flatMap((g) => g.ids.slice(1)); if (await confirm2('Keep the best of every group?', `${ids.length} photos go to the bin. You can review and restore them before anything is deleted.`, 'Move to bin')) { await setStatus(ids, 'trash'); Dups.groups = null; renderClean(); toast(`${ids.length} moved to the bin`); } } }, '★ Keep best in all groups')) : ''));
+      groups.length ? h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' }, h('button', { class: 'btn pri', onclick: async () => { const ids = groups.flatMap((g) => g.ids.slice(1)); if (await confirm2('Keep the best of every group?', `${ids.length} photos go to the bin. You can review and restore them before anything is deleted.`, 'Move to bin')) { await setStatus(ids, 'trash'); renderClean(); toast(`${ids.length} moved to the bin`); } } }, '★ Keep best in all groups')) : ''));
     if (!groups.length) body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '✨'), h('p', {}, 'No duplicates at this setting.')));
     const list = h('div'); body.append(list); let shown = 0;
     const addG = () => { for (const g of groups.slice(shown, shown + 30)) {
@@ -914,7 +943,8 @@ async function renderClean() {
   if (cTab === 'junk') {
     if (AI.state !== 'ok' && !(await DB.get('kv', 'txt:' + Junk.normal[0]))) { body.append(h('div', { class: 'card' }, h('p', {}, 'The AI needs to be loaded to sort junk.'), h('button', { class: 'btn pri sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderClean(); } }, 'Load AI'))); return; }
     body.append(h('p', { class: 'sub' }, 'Sorting…'));
-    const { out } = await Junk.compute(); body.innerHTML = '';
+    const { out: raw } = await Junk.compute(); if (tok !== RT_.clean) return; body.innerHTML = '';
+    const out = {}; for (const k in raw) out[k] = raw[k].filter((r) => L.meta.get(r.id)?.status !== 'trash');
     const cards = h('div', { class: 'cards' }); body.append(cards);
     for (const k of [...Object.keys(Junk.groups), 'blur', 'dark']) { const arr = out[k] || []; const gm = Junk.meta(k);
       const mini = h('div', { class: 'mini' }); arr.slice(0, 4).forEach((r) => { const im = h('img', { alt: '' }); Thumbs.url(r.id).then((u) => im.src = u); mini.append(im); }); for (let i = arr.length; i < 4; i++) mini.append(h('div'));
@@ -932,7 +962,7 @@ async function renderClean() {
 function openJunk(k, ids) {
   const keep = new Set(); const gm = Junk.meta(k);
   Modal.open(h('div', {}, h('h2', {}, gm.icon + ' ' + gm.name), h('p', { class: 'sub' }, 'Everything marked ✕ goes to the bin. Tap a photo to keep it.'),
-    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id)); await setStatus(go2, 'trash'); Junk.cache = null; Modal.close(); renderClean(); toast(`${go2.length} moved to the bin`); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Cancel')),
+    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id)); await setStatus(go2, 'trash'); Modal.close(); renderClean(); toast(`${go2.length} moved to the bin`); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Cancel')),
     grid(ids, { cls: () => ' mark', onTap: (id, t) => { if (keep.has(id)) keep.delete(id); else keep.add(id); t.classList.toggle('mark', !keep.has(id)); } })), true);
 }
 
@@ -986,7 +1016,7 @@ const UI = {
       else if (L.count && L.folders.size && [...L.folders.values()].some((f) => Date.now() - (f.lastScan || 0) > 864e5)) ban.append(h('div', { class: 'banner' }, h('span', {}, 'New photos since last time?'), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check now'))); }
   },
   binCount() { const n = L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length; $('#binN').textContent = n ? `(${n})` : ''; },
-  refreshLight() { if (cur === 'search' && !S.q) renderSearch(); this.binCount(); },
+  refreshLight() { if (cur === 'search' && !S.q && !$('#viewer').classList.contains('on') && $('#main').scrollTop < 200) renderSearch(); this.binCount(); },
   refreshAll() { Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); this.binCount(); },
 };
 UI.renderLib = renderLib;
@@ -1006,7 +1036,7 @@ $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.val
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.4): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.5): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
