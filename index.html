@@ -145,10 +145,21 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 #viewer .vacts{display:flex;gap:8px;overflow-x:auto;padding:12px 14px calc(14px + var(--safe-b));justify-content:center;flex-wrap:wrap}
 .toast{position:fixed;left:50%;bottom:calc(96px + var(--safe-b));transform:translateX(-50%) translateY(20px);opacity:0;padding:12px 18px;border-radius:14px;background:#1d1d2c;border:1px solid var(--line);box-shadow:0 20px 50px rgba(0,0,0,.5);z-index:40;transition:.25s;font-size:14px;max-width:90%;pointer-events:none}
 .toast.on{opacity:1;transform:translateX(-50%)}
-#selbar{position:fixed;left:50%;bottom:calc(84px + var(--safe-b));transform:translateX(-50%) translateY(30px);opacity:0;visibility:hidden;pointer-events:none;z-index:15;display:flex;align-items:center;gap:6px;padding:8px;border-radius:20px;background:#191926;border:1px solid var(--line);box-shadow:0 20px 60px rgba(0,0,0,.6);transition:.25s;max-width:96%;overflow-x:auto}
+#selbar{position:fixed;left:50%;bottom:calc(84px + var(--safe-b));transform:translateX(-50%) translateY(30px);opacity:0;visibility:hidden;pointer-events:none;z-index:15;width:min(520px,calc(100% - 20px));padding:8px 8px 6px;border-radius:22px;background:rgba(25,25,38,.92);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid var(--line);box-shadow:0 20px 60px rgba(0,0,0,.6);transition:.25s}
 #selbar.on{transform:translateX(-50%);opacity:1;visibility:visible;pointer-events:auto}
 @media(min-width:900px){#selbar{bottom:24px}}
-#selbar .n{padding:0 10px;font-weight:700;white-space:nowrap}
+#selbar .st{display:flex;align-items:center;gap:6px;padding:0 0 4px 10px}
+#selbar .n{flex:1;font-weight:700;white-space:nowrap}
+#selbar .sall{font-size:13px;color:var(--mute);padding:8px 10px;border-radius:10px}
+#selbar .sx{width:36px;height:36px;border-radius:12px}
+#selbar .sacts{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;border-top:1px solid var(--line);padding-top:4px}
+#selbar .sa{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 2px 6px;border-radius:14px;font-size:11.5px;font-weight:600;color:var(--text);min-width:0;white-space:nowrap}
+#selbar .sa:active{background:rgba(255,255,255,.07);transform:scale(.95)}
+#selbar .sa svg{width:22px;height:22px}
+#selbar .sa.dz{color:#ff8a9b}
+#binBtn{position:relative;width:40px;height:40px;border:1px solid var(--line)}#binBtn svg{width:20px;height:20px}
+#binBtn b{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;border-radius:99px;background:#ff5a6e;color:#fff;font-size:11px;line-height:19px;text-align:center}
+#binBtn b:empty{display:none}
 /* onboarding */
 #onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(124,92,255,.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(40,210,230,.18),transparent 60%),var(--bg);overflow:auto}
 .ob{max-width:620px;margin:0 auto;padding:60px 24px 40px;text-align:center}
@@ -171,6 +182,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
   <header>
     <div class="logo"><img src="icon-192.png" alt=""><span>Iris</span></div>
     <button class="pill" id="pill" title="AI status"><i class="dot" id="pdot"></i><span id="ptext">AI not loaded</span></button>
+    <button class="iconbtn" id="binBtn" title="Bin" aria-label="Bin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg><b id="binN"></b></button>
   </header>
 
   <main id="main">
@@ -193,7 +205,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <section class="view" id="v-clean">
       <h1>Clean <span class="grad">up</span></h1>
       <p class="sub">Find duplicates and junk. Nothing is deleted until you empty the bin.</p>
-      <div class="seg" id="cseg"><button data-t="dup" class="on">Duplicates</button><button data-t="junk">Junk</button><button data-t="bin">Bin <span id="binN"></span></button></div>
+      <div class="seg" id="cseg"><button data-t="dup" class="on">Duplicates</button><button data-t="junk">Junk</button></div>
       <div id="cbody"></div>
     </section>
 
@@ -233,6 +245,13 @@ input[type=range]{width:100%;accent-color:var(--a1)}
       <p class="sub">Everything stays on this device. Photos are never uploaded.</p>
       <div id="libBody"></div>
     </section>
+
+    <!-- BIN -->
+    <section class="view" id="v-bin">
+      <h1>The <span class="grad">bin</span></h1>
+      <p class="sub">Photos here are hidden from Iris but still on your phone. Delete them to remove them from your phone for good.</p>
+      <div id="binBody"></div>
+    </section>
   </main>
 
   <nav class="nav" id="nav">
@@ -244,14 +263,8 @@ input[type=range]{width:100%;accent-color:var(--a1)}
   </nav>
 </div>
 
-<div id="selbar"><span class="n" id="selN">0 selected</span>
-  <button class="btn sm" data-a="like">More like these</button>
-  <button class="btn sm" data-a="best">Best of these</button>
-  <button class="btn sm" data-a="coll">Add to collection</button>
-  <button class="btn sm" data-a="share">Share</button>
-  <button class="btn sm danger" data-a="bin">Move to bin</button>
-  <button class="btn sm" data-a="restore">Restore</button>
-  <button class="iconbtn" data-a="close" title="Done">✕</button>
+<div id="selbar"><div class="st"><span class="n" id="selN">0 selected</span><button class="sall" data-a="all">Select all</button><button class="iconbtn sx" data-a="close" title="Done">✕</button></div>
+  <div class="sacts"><button class="sa" data-a="like"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg><span>Similar</span></button><button class="sa" data-a="best"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z"/></svg><span>Best</span></button><button class="sa" data-a="coll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M17.5 14v7M14 17.5h7"/></svg><span>Collect</span></button><button class="sa" data-a="share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 13v6a2 2 0 002 2h10a2 2 0 002-2v-6"/></svg><span>Share</span></button><button class="sa dz" data-a="bin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg><span>Bin</span></button><button class="sa" data-a="restore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg><span>Restore</span></button><button class="sa dz" data-a="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13M10 11l4 5M14 11l-4 5"/></svg><span>Delete</span></button></div>
 </div>
 
 <div class="ov" id="viewer"><div class="scrim" style="background:rgba(3,3,8,.94)"></div>
@@ -283,7 +296,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.11</p>
+    <p class="small">Iris 2.12</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +328,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.11';
+const VER = 'Iris 2.12';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -562,7 +575,10 @@ function tile(id, i, list, opts) {
 function startSel() { if (Sel.on) return; Sel.on = true; $$('.grid').forEach((g) => g.classList.add('selmode')); updSel(); }
 function toggleSel(id, t) { if (Sel.set.has(id)) Sel.set.delete(id); else Sel.set.add(id); t?.classList.toggle('sel', Sel.set.has(id)); updSel(); }
 function endSel() { Sel.on = false; Sel.set.clear(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
-function updSel() { $('#selbar').classList.toggle('on', Sel.on); $('#selN').textContent = Sel.set.size + ' selected'; const anyTrash = [...Sel.set].some((id) => L.meta.get(id)?.status === 'trash'); $('#selbar [data-a=restore]').classList.toggle('hide', !anyTrash); $('#selbar [data-a=bin]').classList.toggle('hide', anyTrash && [...Sel.set].every((id) => L.meta.get(id)?.status === 'trash')); }
+function updSel() { $('#selbar').classList.toggle('on', Sel.on); $('#selN').textContent = Sel.set.size + ' selected';
+  const inBin = cur === 'bin' || (Sel.set.size > 0 && [...Sel.set].every((id) => L.meta.get(id)?.status === 'trash'));
+  for (const a of ['like', 'best', 'coll', 'bin']) $(`#selbar [data-a=${a}]`).classList.toggle('hide', inBin);
+  for (const a of ['restore', 'del']) $(`#selbar [data-a=${a}]`).classList.toggle('hide', !inBin); }
 
 /* ---------------- Status (bin) ---------------- */
 async function setStatus(ids, status) { for (const id of ids) { const m = L.meta.get(id); if (!m) continue; m.status = status; await DB.put('meta', id, m); } UI.binCount(); }
@@ -941,7 +957,7 @@ async function deleteFromDevice(ids) {
     if (!(await Folders.perm(f, 'readwrite', true))) { fail += ms.length; continue; }
     for (const m of ms) { try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
   await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Dups.groups = null;
-  UI.refreshAll(); toast(fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : `Deleted ${ok} photos from your device.` + (local.length ? ` Removed ${local.length} from Iris.` : ''), 4500);
+  UI.refreshAll(); toast(fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : `Deleted ${ok} photo${ok === 1 ? '' : 's'} from your phone.` + (local.length ? ` Removed ${local.length} from Iris.` : ''), 4500);
 }
 
 /* ---------------- Viewer ---------------- */
@@ -991,9 +1007,11 @@ function confirm2(title, text, okText, danger) { return new Promise((res) => { c
 $('#selbar').addEventListener('click', async (e) => {
   const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set];
   if (a === 'close') return endSel();
+  if (a === 'all') { [...$$('.view.on .grid')].flatMap((g) => g._ids || []).forEach((id) => Sel.set.add(id)); $$('.view.on .tile').forEach((t) => t.classList.toggle('sel', Sel.set.has(t.dataset.id))); return updSel(); }
   if (!ids.length) return toast('Select some photos first.');
-  if (a === 'bin') { await setStatus(ids, 'trash'); endSel(); UI.refreshLight(); toast(`Moved ${ids.length} to the bin`); }
-  if (a === 'restore') { await setStatus(ids, null); endSel(); UI.refreshLight(); renderClean(); toast(`Restored ${ids.length}`); }
+  if (a === 'bin') { await setStatus(ids, 'trash'); endSel(); UI.refreshLight(); toast(`Moved ${ids.length} to the bin. Open 🗑 at the top to delete them for good.`, 3500); }
+  if (a === 'restore') { await setStatus(ids, null); endSel(); UI.refreshLight(); if (cur === 'bin') renderBin(); else renderClean(); toast(`Restored ${ids.length}`); }
+  if (a === 'del') { if (!(await confirmDelete(ids))) return; endSel(); await deleteFromDevice(ids); if (cur === 'bin') renderBin(); }
   if (a === 'coll') addToColl(ids);
   if (a === 'share') shareIds(ids);
   if (a === 'best') { endSel(); Pick.preset(ids); }
@@ -1035,13 +1053,24 @@ async function renderClean() {
       cards.append(h('div', { class: 'card click', onclick: () => arr.length && openJunk(k, arr.map((r) => r.id)) }, h('h3', {}, gm.icon + ' ' + gm.name), h('div', { class: 'cnt' }, fmtN(arr.length)), mini)); }
     body.append(h('p', { class: 'small', style: 'margin-top:14px' }, 'These are AI guesses. Open a group, untick anything you want to keep, then move the rest to the bin.'));
   }
-  if (cTab === 'bin') {
-    const ids = L.ids.filter((id) => L.meta.get(id)?.status === 'trash'); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
-    body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin')), h('p', {}, bytes ? fmtMB(bytes) + ' can be freed' : 'Nothing will be deleted until you say so.'),
-      ids.length ? h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn', onclick: async () => { await setStatus(ids, null); renderClean(); toast('Restored everything'); } }, 'Restore all'),
-        h('button', { class: 'btn danger', onclick: async () => { if (await confirm2(`Delete ${ids.length} photos from this device?`, 'This removes the files from your folders and can’t be undone here. Your browser will ask for permission to edit the folder: choose Allow.', 'Delete forever', true)) deleteFromDevice(ids); } }, 'Delete from device')) : ''));
-    if (ids.length) body.append(grid(ids, { noTrashStyle: true })); else body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty.')));
-  }
+}
+/* ---------------- Bin (its own view, opened from the header) ---------------- */
+const binIds = () => L.ids.filter((id) => L.meta.get(id)?.status === 'trash');
+const protectedN = (ids) => ids.filter((id) => /no[\s_-]*delete/i.test(L.folders.get(L.meta.get(id)?.folder)?.name || '')).length;
+async function confirmDelete(ids) {
+  const p = protectedN(ids);
+  return confirm2(`Delete ${fmtN(ids.length)} photo${ids.length === 1 ? '' : 's'} from your phone?`,
+    (p ? `⚠ ${fmtN(p)} of them ${p === 1 ? "is" : "are"} in your NO DELETE folder. ` : '') + 'They’re removed from your phone for good, not moved to another bin. If your browser asks to let Iris edit the folder, choose Allow.', 'Delete for good', true);
+}
+function renderBin() {
+  const body = $('#binBody'); body.innerHTML = ''; UI.binCount(); const ids = binIds(); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
+  if (!ids.length) return body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty. Select photos anywhere and tap Bin.')));
+  body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin' + (bytes ? ' · ' + fmtMB(bytes) : ''))),
+    h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px' },
+      h('button', { class: 'btn', onclick: async () => { await setStatus(ids, null); renderBin(); UI.refreshLight(); toast('Restored everything'); } }, 'Restore all'),
+      h('button', { class: 'btn danger', onclick: async () => { if (await confirmDelete(ids)) { await deleteFromDevice(ids); renderBin(); } } }, 'Delete all')),
+    h('p', { class: 'small', style: 'margin-top:10px' }, 'Long-press a photo to pick only some.')));
+  body.append(grid(ids, { noTrashStyle: true }));
 }
 function openJunk(k, ids) {
   const keep = new Set(); const gm = Junk.meta(k);
@@ -1107,13 +1136,13 @@ const UI = {
       else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
       else if (AI.state === 'busy' && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, 'Getting the AI ready. This takes up to a minute the first time…')));
       else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
-      else if (UI.pendingScan && L.folders.size) ban.append(h('div', { class: 'banner' }, h('span', {}, `Iris stopped at ${fmtN(L.count)} photos before finishing.`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Continue')));
+      else if (UI.pendingScan && L.folders.size) ban.append(h('div', { class: 'banner' }, h('span', {}, `Paused at ${fmtN(L.count)} photos because Iris was closed or reloaded.`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Continue')));
       else if (L.count && L.folders.size && [...L.folders.values()].some((f) => Date.now() - (f.lastScan || 0) > 864e5)) ban.append(h('div', { class: 'banner' }, h('span', {}, 'New photos since last time?'), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check now'))); }
   },
   newChip() { if (cur !== 'search' || S.q) return; const shown = $('#sres .grid')?._ids?.length || 0; const n = L.live().length - shown; let c = $('#newChip'); if (n <= 0) { c?.remove(); return; } if (!c) { c = h('button', { id: 'newChip', class: 'chip on', onclick: () => { c.remove(); renderSearch(); $('#main').scrollTop = 0; } }); $('#sbar').append(h('span', { class: 'sp' }), c); } c.textContent = `↻ ${fmtN(n)} new`; },
-  binCount() { const n = L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length; $('#binN').textContent = n ? `(${n})` : ''; },
+  binCount() { const n = binIds().length; $('#binN').textContent = n ? (n > 999 ? '999+' : String(n)) : ''; },
   refreshLight() { if (cur === 'search' && !S.q && !$('#viewer').classList.contains('on') && $('#main').scrollTop < 200) renderSearch(); this.binCount(); },
-  refreshAll() { Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); this.binCount(); },
+  refreshAll() { Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); if (cur === 'bin') renderBin(); this.binCount(); },
 };
 UI.renderLib = renderLib;
 async function ensureAI() {
@@ -1125,8 +1154,9 @@ async function ensureAI() {
 
 let cur = 'search';
 function go(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v)); $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); $('#main').scrollTop = 0;
-  if (v === 'search') { if (!S.q) renderSearch(); } if (v === 'clean') renderClean(); if (v === 'coll') renderColl(); if (v === 'pick') renderPickSrc(); if (v === 'lib') renderLib(); }
+  if (v === 'search') { if (!S.q) renderSearch(); } if (v === 'clean') renderClean(); if (v === 'coll') renderColl(); if (v === 'pick') renderPickSrc(); if (v === 'lib') renderLib(); if (v === 'bin') renderBin(); }
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
+$('#binBtn').onclick = () => { if (Sel.on) endSel(); go('bin'); };
 $('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
 $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
 // "Folder, no pop-up" uses <input webkitdirectory>. Some Android browsers (Edge) ignore it silently, so watch for the
@@ -1141,7 +1171,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.11): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.12): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
