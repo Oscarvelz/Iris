@@ -11,6 +11,7 @@ async function decodeHeif(file) {
   const im = imgs[0]; const w = im.get_width(), h = im.get_height();
   const data = await new Promise((res, rej) => im.display({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }, (r) => r ? res(r) : rej(new Error('HEIF decode failed'))));
   for (const i of imgs) try { i.free && i.free(); } catch {}
+  try { dec.decoder && heif.heif_context_free && heif.heif_context_free(dec.decoder); } catch {}
   return createImageBitmap(new ImageData(data.data, w, h));
 }
 async function bitmap(file) {
@@ -47,7 +48,7 @@ async function prep(file) {
   return { bytes, thumb, w: W, h: H, bright, sharp, dh };
 }
 onmessage = async ({ data }) => {
-  if (data.op === 'big') { try { postMessage({ id: data.id, p: await big(data.file) }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); } return; }
-  try { const p = await prep(data.file); postMessage({ id: data.id, p }, p ? [p.bytes.buffer] : []); }
-  catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); }
+  if (data.op === 'big') { try { postMessage({ id: data.id, p: await big(data.file), heavy: isHeif(data.file) ? 1 : 0 }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); } return; }
+  try { const p = await prep(data.file); postMessage({ id: data.id, p, heavy: isHeif(data.file) ? 1 : 0 }, p ? [p.bytes.buffer] : []); }
+  catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e), heavy: isHeif(data.file) ? 1 : 0 }); }
 };
