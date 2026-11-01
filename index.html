@@ -329,7 +329,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.16';
+const VER = 'Iris 2.17';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -337,7 +337,7 @@ const Log = {
   async report() {
     let est = {}; try { est = await navigator.storage.estimate(); } catch {}
     let gpu = 'none'; try { const a = await navigator.gpu?.requestAdapter(); gpu = a ? 'yes ' + (a.info?.vendor || '') + ' ' + (a.info?.architecture || '') : 'no adapter'; } catch (e) { gpu = 'err ' + e.message; }
-    return [`${VER} · ${new Date().toISOString()} · open ${Math.round(performance.now() / 1000)}s`, navigator.userAgent, `WebGPU: ${gpu} · dirPicker: ${'showDirectoryPicker' in window} · cores ${navigator.hardwareConcurrency}`,
+    return [`${VER} · ${new Date().toISOString()} · open ${Math.round(performance.now() / 1000)}s`, navigator.userAgent, `${NATIVE ? 'Shell ' + (window.IrisNative.version?.() || '?') + ' · all files ' + Nat.has() + ' · ' : ''}WebGPU: ${gpu} · dirPicker: ${'showDirectoryPicker' in window} · cores ${navigator.hardwareConcurrency}`,
       `AI: ${AI.state} ${AI.lastErr ? '(' + AI.lastErr.message + ')' : ''} · ${AI.msPer ? Math.round(AI.msPer) + ' ms/photo' : ''}`,
       `Photos: ${L.count} · folders: ${[...L.folders.values()].map((f) => f.name).join(', ') || 'none'} · queue ${Indexer.queue.length} · running ${Indexer.running} · scanning ${Indexer.scanning || 'no'} (listed ${Indexer.found || 0}) · waiting ${(Indexer.later || []).map((f) => f.name).join(', ') || 'none'} · done ${Indexer.done}/${Indexer.total} skipped ${Indexer.skipped}`,
       `Storage: ${est.usage ? fmtMB(est.usage) : '?'} of ${est.quota ? fmtMB(est.quota) : '?'}`, '---', ...this.lines].join('\n');
@@ -491,7 +491,8 @@ const AI = {
 };
 
 /* ---------------- Image analysis (in background workers) ---------------- */
-const IS_EDGE = /\bEdgA?\//.test(navigator.userAgent);
+const NATIVE = !!window.IrisNative; // running inside the Iris for Android shell
+const IS_EDGE = /\bEdgA?\//.test(navigator.userAgent) || NATIVE; // both: hide the webkitdirectory trick
 const Prep = {
   // Worker pool. HEIC decoding (libheif WASM) grows each worker's memory and it never shrinks, so a worker is
   // recycled after a few HEIC photos, and a crashed worker is replaced instead of giving up on workers for good.
@@ -613,9 +614,51 @@ function updSel() { $('#selbar').classList.toggle('on', Sel.on); $('#selN').text
 /* ---------------- Status (bin) ---------------- */
 async function setStatus(ids, status) { for (const id of ids) { const m = L.meta.get(id); if (!m) continue; m.status = status; await DB.put('meta', id, m); } UI.binCount(); }
 
+/* ---------------- Native shell (Iris for Android) ----------------
+   Inside the shell, Android gives Iris "All files access" once, for good. These handles act like the browser's
+   folder handles, so the rest of Iris works unchanged, but nothing ever needs to be allowed again. */
+const NAT_URL = 'https://iris.native/f?p=';
+const Nat = {
+  call(fn, ...a) { let r; try { r = window.IrisNative[fn](...a.map(String)); } catch (e) { throw new DOMException(e.message || 'Android error', 'NotReadableError'); } return JSON.parse(r); },
+  has() { try { return this.call('hasAccess'); } catch { return false; } },
+  root: '',
+};
+class NFile { constructor(path, name, s, m) { this.__native = path; this.name = name; this.kind = 'file'; this.s = s; this.m = m; }
+  async getFile() { const r = await fetch(NAT_URL + encodeURIComponent(this.__native)); if (!r.ok) throw new DOMException('Could not read ' + this.name, 'NotReadableError');
+    const b = await r.blob(); return new File([b], this.name, { type: b.type, lastModified: this.m || Date.now() }); } }
+class NDir { constructor(path, name) { this.__native = path; this.name = name ?? path.split('/').pop(); this.kind = 'directory'; }
+  async *entries() { for (const e of Nat.call('list', this.__native)) { const p = this.__native + '/' + e.n; yield [e.n, e.d ? new NDir(p, e.n) : new NFile(p, e.n, e.s, e.m)]; } }
+  async getDirectoryHandle(n) { const p = this.__native + '/' + n; if (!Nat.call('isDir', p)) throw new DOMException(n + ' not found', 'NotFoundError'); return new NDir(p, n); }
+  async getFileHandle(n) { const p = this.__native + '/' + n; const st = Nat.call('stat', p); if (!st) throw new DOMException(n + ' not found', 'NotFoundError'); return new NFile(p, n, st.s, st.m); }
+  async removeEntry(n) { if (!Nat.call('del', this.__native + '/' + n)) throw new DOMException('Android refused to delete ' + n, 'NoModificationAllowedError'); }
+  async queryPermission() { return Nat.has() ? 'granted' : 'prompt'; }
+  async requestPermission() { if (Nat.has()) return 'granted'; Nat.ask(); return 'prompt'; }
+  async isSameEntry(o) { return !!o && o.__native === this.__native; } }
+if (NATIVE) {
+  try { Nat.root = Nat.call('root'); } catch {}
+  // one sheet, shown only until Android's "All files access" switch is on; it never comes back after that
+  Nat.ask = () => { if (Nat.has() || $('#modal').classList.contains('on') && Nat._asking) return;
+    Nat._asking = true; Modal.open(h('div', {}, h('h2', {}, '🔓 One switch, once'), h('p', { class: 'sub' }, 'Turn on “Allow access to manage all files” for Iris. Android remembers it for good: no more Allow pop-ups, any folder, and deleting from the bin just works.'),
+      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Nat._asking = false; Modal.close(); } }, 'Later'), h('button', { class: 'btn pri', onclick: () => window.IrisNative.askAccess() }, 'Open the switch'))), false, () => { Nat._asking = false; }); };
+  addEventListener('irisnative-resume', () => { if (Nat._asking && Nat.has()) { Nat._asking = false; Modal.close(); toast('Done. Iris can reach your photos for good.', 3500); if (typeof renderLib === 'function' && cur === 'lib') renderLib(); } });
+  // the shell's own folder picker: any folder, including all of the phone's storage at once
+  window.showDirectoryPicker = () => new Promise((res, rej) => {
+    if (!Nat.has()) { Nat.ask(); return rej(new DOMException('Turn on the switch first, then tap again.', 'AbortError')); }
+    const ROOT = Nat.root; let at = ROOT, done = false; const box = h('div', {});
+    const end = (v) => { if (done) return; done = true; Modal.close(); v ? res(v) : rej(new DOMException('cancelled', 'AbortError')); };
+    const label = (p) => p === ROOT ? 'Phone storage' : p.split('/').pop();
+    const draw = () => { let list = []; try { list = Nat.call('list', at).filter((e) => e.d && !e.n.startsWith('.') && !(at === ROOT && e.n === 'Android')).sort((a, b) => a.n.localeCompare(b.n)); } catch {}
+      const row = (txt, fn, right = '›') => h('div', { class: 'kv', style: 'padding:11px 2px;cursor:pointer', onclick: fn }, h('span', {}, txt), h('span', { class: 'small' }, right));
+      box.innerHTML = ''; box.append(h('h2', {}, '📁 ' + label(at)), h('p', { class: 'sub' }, at === ROOT ? 'Use everything at once, or open a folder.' : at.slice(ROOT.length + 1)),
+        h('div', { style: 'max-height:52vh;overflow:auto;margin:10px 0' }, ...(at !== ROOT ? [row('↑ Back', () => { at = at.slice(0, at.lastIndexOf('/')); draw(); }, '')] : []), ...list.map((e) => row('📁 ' + e.n, () => { at = at + '/' + e.n; draw(); }))),
+        h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => end(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => end(new NDir(at, label(at))) }, at === ROOT ? 'Use all photos' : 'Use ' + label(at)))); };
+    draw(); Modal.open(box, false, () => end(null)); });
+  window.IrisNative.ready?.();
+}
+
 /* ---------------- Folders & permissions ---------------- */
 const Folders = {
-  supported: 'showDirectoryPicker' in window,
+  supported: NATIVE || 'showDirectoryPicker' in window,
   async perm(f, mode = 'read', ask = true) {
     let q = '?'; try { q = await f.handle.queryPermission({ mode }); if (q === 'granted') return true; } catch (e) { q = 'err ' + e.message; }
     if (!ask) return false;
@@ -691,7 +734,7 @@ const Folders = {
     try {
       for await (const [name, h] of dir.entries()) {
         if (name.startsWith('.')) continue;
-        if (h.kind === 'directory') { if (/^(cache|trash)$/i.test(name)) continue; yield* this.walk(h, [...path, name]); }
+        if (h.kind === 'directory') { if (/^(cache|trash)$/i.test(name) || (NATIVE && dir.__native === Nat.root && name === 'Android')) continue; yield* this.walk(h, [...path, name]); }
         else if (IMG_RE.test(name)) yield { h, path, name };
         else { const ext = (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || '?').toLowerCase(); this.stats.skippedTypes[ext] = (this.stats.skippedTypes[ext] || 0) + 1; }
       }
@@ -1009,6 +1052,7 @@ $('#pGo').onclick = () => { if (!L.count) return toast('Add some photos first.')
 
 /* ---------------- Sharing & deleting ---------------- */
 async function shareIds(ids) {
+  if (NATIVE) { const ps = ids.slice(0, 100).map((id) => { const m = L.meta.get(id), f = L.folders.get(m?.folder); return f?.handle?.__native ? [f.handle.__native, ...m.path, m.name].join('/') : null; }).filter(Boolean); if (!ps.length) return toast('Nothing to share.'); window.IrisNative.share(JSON.stringify(ps)); return; }
   if (!navigator.share) return toast('Sharing is not supported in this browser.');
   ids = ids.slice(0, 60); const files = [];
   for (const id of ids) { const f = await Folders.fileFor(id, true); if (f) files.push(f); }
@@ -1122,11 +1166,11 @@ async function renderClean() {
 }
 /* ---------------- Bin (its own view, opened from the header) ---------------- */
 const binIds = () => L.ids.filter((id) => L.meta.get(id)?.status === 'trash');
-const protectedN = (ids) => ids.filter((id) => /no[\s_-]*delete/i.test(L.folders.get(L.meta.get(id)?.folder)?.name || '')).length;
+const protectedN = (ids) => ids.filter((id) => { const m = L.meta.get(id); return /no[\s_-]*delete/i.test((L.folders.get(m?.folder)?.name || '') + '/' + (m?.path || []).join('/')); }).length;
 async function confirmDelete(ids) {
   const p = protectedN(ids);
   return confirm2(`Delete ${fmtN(ids.length)} photo${ids.length === 1 ? '' : 's'} from your phone?`,
-    (p ? `⚠ ${fmtN(p)} of them ${p === 1 ? "is" : "are"} in your NO DELETE folder. ` : '') + 'They’re removed from your phone for good, not moved to another bin. If your browser asks to let Iris edit the folder, choose Allow.', 'Delete for good', true);
+    (p ? `⚠ ${fmtN(p)} of them ${p === 1 ? "is" : "are"} in your NO DELETE folder. ` : '') + 'They’re removed from your phone for good, not moved to another bin. ' + (NATIVE ? '' : 'If your browser asks to let Iris edit the folder, choose Allow.'), 'Delete for good', true);
 }
 function renderBin() {
   const body = $('#binBody'); body.innerHTML = ''; UI.binCount(); const ids = binIds(); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
@@ -1253,7 +1297,8 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
   await DB.open();
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
   for (const [id, buf] of vecs) { const m = metas.get(id); if (m) L.add(m, new Float32Array(buf)); }
-  for (const [id, f] of await DB.all('folders')) L.folders.set(id, f);
+  for (const [id, f] of await DB.all('folders')) { if (f.handle?.__native) Object.setPrototypeOf(f.handle, NDir.prototype); L.folders.set(id, f); }
+  if (NATIVE && !Nat.has()) Nat.ask();
   for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
   UI.pendingScan = !!(await DB.get('kv', 'pendingScan'));
   { const smp = L.ids.filter((id) => id.startsWith('sample:')); if (smp.length) { await DB.removeItems(smp); smp.forEach((id) => L.meta.delete(id)); L.rebuild(); Log.add('info', 'removed sample photos', smp.length); } } // samples are gone for good
