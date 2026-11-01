@@ -161,6 +161,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 #binBtn b{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;border-radius:99px;background:#ff5a6e;color:#fff;font-size:11px;line-height:19px;text-align:center}
 #binBtn b:empty{display:none}
 /* onboarding */
+#modal{z-index:35}
 #onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(124,92,255,.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(40,210,230,.18),transparent 60%),var(--bg);overflow:auto}
 .ob{max-width:620px;margin:0 auto;padding:60px 24px 40px;text-align:center}
 .ob img.hero{width:120px;height:120px;border-radius:30px;box-shadow:0 30px 80px rgba(124,92,255,.45);animation:float 5s ease-in-out infinite}
@@ -296,7 +297,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.16</p>
+    <p class="small" id="obVer"></p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -329,7 +330,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.17';
+const VER = 'Iris 2.18';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1282,7 +1283,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.16): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
@@ -1305,6 +1306,7 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
   renderSearchChips(); renderSearch(); renderPickSrc(); UI.binCount(); UI.renderIndex();
   const rot = ['Describe a photo…', 'golden hour at the beach', 'mi perro durmiendo', 'birthday cake with candles', 'old books on a table', 'beach -people'];
   let ri = 0; setInterval(() => { if (!S.img && document.activeElement !== $('#q')) $('#q').placeholder = rot[ri++ % rot.length]; }, 3500);
+  $('#obVer').textContent = VER + (NATIVE ? ' · Android app' : '');
   if (!localStorage.getItem('iris-ob') && !L.count) $('#onboard').classList.add('on');
   if (await AI.cached()) { AI.setPill('busy', 'Starting AI…'); AI.load().catch(() => UI.renderIndex()); } else AI.setPill('', L.count ? 'AI not downloaded' : 'AI not loaded');
 })();
