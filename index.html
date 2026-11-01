@@ -283,7 +283,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.10</p>
+    <p class="small">Iris 2.11</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.10';
+const VER = 'Iris 2.11';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -323,9 +323,9 @@ const Log = {
   async report() {
     let est = {}; try { est = await navigator.storage.estimate(); } catch {}
     let gpu = 'none'; try { const a = await navigator.gpu?.requestAdapter(); gpu = a ? 'yes ' + (a.info?.vendor || '') + ' ' + (a.info?.architecture || '') : 'no adapter'; } catch (e) { gpu = 'err ' + e.message; }
-    return [`${VER} · ${new Date().toISOString()}`, navigator.userAgent, `WebGPU: ${gpu} · dirPicker: ${'showDirectoryPicker' in window} · cores ${navigator.hardwareConcurrency}`,
+    return [`${VER} · ${new Date().toISOString()} · open ${Math.round(performance.now() / 1000)}s`, navigator.userAgent, `WebGPU: ${gpu} · dirPicker: ${'showDirectoryPicker' in window} · cores ${navigator.hardwareConcurrency}`,
       `AI: ${AI.state} ${AI.lastErr ? '(' + AI.lastErr.message + ')' : ''} · ${AI.msPer ? Math.round(AI.msPer) + ' ms/photo' : ''}`,
-      `Photos: ${L.count} · folders: ${[...L.folders.values()].map((f) => f.name).join(', ') || 'none'} · queue ${Indexer.queue.length} · running ${Indexer.running} · scanning ${Indexer.scanning || 'no'} · done ${Indexer.done}/${Indexer.total} skipped ${Indexer.skipped}`,
+      `Photos: ${L.count} · folders: ${[...L.folders.values()].map((f) => f.name).join(', ') || 'none'} · queue ${Indexer.queue.length} · running ${Indexer.running} · scanning ${Indexer.scanning || 'no'} (listed ${Indexer.found || 0}) · waiting ${(Indexer.later || []).map((f) => f.name).join(', ') || 'none'} · done ${Indexer.done}/${Indexer.total} skipped ${Indexer.skipped}`,
       `Storage: ${est.usage ? fmtMB(est.usage) : '?'} of ${est.quota ? fmtMB(est.quota) : '?'}`, '---', ...this.lines].join('\n');
   },
 };
@@ -653,7 +653,7 @@ const Indexer = {
         for await (const e of Folders.walk(f.handle)) {
           const id = `${f.id}:${e.path.join('/')}/${e.name}`; seen.add(id); this.found++;
           if (!L.meta.has(id) && !this.queued.has(id)) { this.queued.add(id); fresh++; this.queue.push({ id, getFile: () => e.h.getFile(), base: { id, name: e.name, path: e.path, folder: f.id, src: 'folder' } });
-            if (fresh % 20 === 1) { this.grow(); if (!this.running) this.start(); } }
+            if (fresh === 1) Log.add('info', `first new photo in ${f.name} after ${Math.round(performance.now() - tS)} ms`); if (fresh % 20 === 1) { this.grow(); if (!this.running) this.start(); } }
           if (this.found % 100 === 0) { UI.renderIndex(); await sleep(0); }
         }
       } catch (err) { ok = false; console.error('scan failed', f.name, err); toast('Couldn’t read ' + f.name + ': ' + err.message + '. Tap Start to reconnect it.', 6000); }
@@ -1141,7 +1141,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.10): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.11): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
