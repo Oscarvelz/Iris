@@ -282,11 +282,12 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 1.5</p>
+    <p class="small">Iris 1.6</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
 <input type="file" id="fPhotos" accept="image/*" multiple class="hide">
+<input type="file" id="fDir" webkitdirectory multiple class="hide">
 <div class="toast" id="toast"></div>
 
 <script type="module">
@@ -530,6 +531,7 @@ const Folders = {
       const finish = (v) => { Modal.close(); res(v); };
       Modal.open(h('div', {}, h('h2', {}, '📁 Reconnect ' + f.name),
         h('p', { class: 'sub' }, `Chrome forgets folder access when Iris closes. Tap Open, then “Use this folder” on ${f.name}` + (mode === 'readwrite' ? ', and Allow editing so Iris can delete.' : '.')),
+        h('p', { class: 'small' }, 'If Allow won’t respond, close floating apps (fooView, screen filters, chat bubbles) first.'),
         h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => finish(false) }, 'Not now'),
           h('button', { class: 'btn pri', onclick: async () => {
             let nh; try { nh = await window.showDirectoryPicker({ id: 'iris', mode, startIn: f.handle }); } catch (e) { if (e.name !== 'AbortError') toast('Couldn’t open the picker: ' + e.message); return finish(false); }
@@ -594,7 +596,7 @@ const Indexer = {
   },
   grow() { if (this.running) this.total = this.done + this.queue.length + 1; },
   addFiles(files, src = 'pick') {
-    for (const file of files) { if (!file.type.startsWith('image/') && !IMG_RE.test(file.name)) continue; const id = `${src}:${file.name}:${file.size}:${file.lastModified}`; if (L.meta.has(id)) continue; L.session.set(id, file); this.queue.push({ id, getFile: async () => file, base: { id, name: file.name, path: [], folder: null, size: file.size, mtime: file.lastModified, src } }); }
+    for (const file of files) { if (!file.type.startsWith('image/') && !IMG_RE.test(file.name)) continue; if (file.type.startsWith('video/')) continue; const id = `${src}:${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`; if (L.meta.has(id)) continue; L.session.set(id, file); this.queue.push({ id, getFile: async () => file, base: { id, name: file.name, path: [], folder: null, size: file.size, mtime: file.lastModified, src } }); }
     this.grow(); this.start();
   },
   async addSamples() {
@@ -699,7 +701,8 @@ function renderSearch() {
 }
 function emptyLib() {
   return h('div', { class: 'empty' }, h('div', { class: 'big' }, '🖼️'), h('h2', {}, 'No photos yet'), h('p', {}, 'Add a folder from your tablet, or try 44 sample photos first.'),
-    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => Indexer.addSamples() }, 'Try sample photos')));
+    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => $('#fDir').click() }, 'Folder, no Chrome pop-up'), h('button', { class: 'btn', onclick: () => Indexer.addSamples() }, 'Try sample photos')),
+    h('p', { class: 'small', style: 'margin-top:14px' }, 'Can’t tap Allow? Floating apps like fooView or screen filters block Chrome’s buttons. Close them, or use “Folder, no Chrome pop-up”.'));
 }
 
 /* ---------------- Junk sweeper ---------------- */
@@ -974,7 +977,7 @@ async function renderLib() {
   if (!L.folders.size) folders.append(h('p', {}, Folders.supported ? 'No folders yet. Pick one parent folder like DCIM or Pictures so Chrome only asks once.' : 'This browser can’t open folders, so add photos directly instead.'));
   for (const f of L.folders.values()) { const n = L.ids.filter((id) => L.meta.get(id)?.folder === f.id).length;
     folders.append(h('div', { class: 'kv', style: 'align-items:center;gap:8px' }, h('span', {}, '📁 ' + f.name), h('span', { style: 'display:flex;gap:6px;align-items:center' }, h('span', { class: 'small' }, fmtN(n) + ' photos'), h('button', { class: 'btn sm', onclick: () => Indexer.scan([f]) }, 'Check for new'), h('button', { class: 'btn sm', onclick: async () => { if (await confirm2(`Remove ${f.name}?`, 'Iris forgets these photos. Your files stay exactly where they are.', 'Remove')) Folders.remove(f); } }, '✕')))); }
-  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), h('button', { class: 'btn sm', onclick: () => Indexer.addSamples() }, 'Add sample photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
+  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => $('#fDir').click() }, '+ Folder, no Chrome pop-up'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), h('button', { class: 'btn sm', onclick: () => Indexer.addSamples() }, 'Add sample photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
   b.append(folders);
   let est = {}; try { est = await navigator.storage.estimate(); } catch {}
   const cached = await AI.cached();
@@ -1033,10 +1036,11 @@ function go(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
 $('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
 $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
+$('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) => IMG_RE.test(f.name)); e.target.value = ''; if (fs.length) { Indexer.addFiles(fs, 'dir'); toast(`Adding ${fmtN(fs.length)} photos`); } else toast('No photos found in that folder.'); };
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.5): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 1.6): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
