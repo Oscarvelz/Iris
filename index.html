@@ -769,8 +769,8 @@ function renderSearch() {
   }));
 }
 function emptyLib() {
-  return h('div', { class: 'empty' }, h('div', { class: 'big' }, '🖼️'), h('h2', {}, 'No photos yet'), h('p', {}, 'Add a folder from your tablet, or try 44 sample photos first.'),
-    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => $('#fDir').click() }, 'Folder, no Chrome pop-up'), h('button', { class: 'btn', onclick: () => Indexer.addSamples() }, 'Try sample photos')),
+  return h('div', { class: 'empty' }, h('div', { class: 'big' }, '🖼️'), h('h2', {}, 'No photos yet'), h('p', {}, 'Add a folder from your tablet.'),
+    h('div', { style: 'display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px' }, h('button', { class: 'btn pri', onclick: () => Folders.add() }, '+ Add a photo folder'), h('button', { class: 'btn', onclick: () => $('#fDir').click() }, 'Folder, no Chrome pop-up')),
     h('p', { class: 'small', style: 'margin-top:14px' }, 'Can’t tap Allow? Floating apps like fooView or screen filters block Chrome’s buttons. Close them, or use “Folder, no Chrome pop-up”.'));
 }
 
