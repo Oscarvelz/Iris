@@ -1,7 +1,7 @@
 // Iris prep worker: decodes photos, makes the AI copy + thumbnail, and measures sharpness/brightness,
 // all off the main thread so scrolling and taps stay smooth while indexing.
 async function prep(file) {
-  let bmp; try { bmp = await createImageBitmap(file); } catch { return null; }
+  let bmp; try { bmp = await createImageBitmap(file); } catch (e) { throw new Error('can’t decode ' + (file.type || file.name) + ': ' + (e && e.message || e)); }
   const W = bmp.width, H = bmp.height; const s = Math.min(1, 640 / Math.max(W, H));
   const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
   const c = new OffscreenCanvas(mw, mh); c.getContext('2d').drawImage(bmp, 0, 0, mw, mh); bmp.close();
