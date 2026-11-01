@@ -283,7 +283,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.3</p>
+    <p class="small">Iris 2.4</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.3';
+const VER = 'Iris 2.4';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1047,7 +1047,7 @@ async function renderLib() {
   if (!L.folders.size) folders.append(h('p', {}, Folders.supported ? 'No folders yet. Pick one parent folder like DCIM or Pictures so Chrome only asks once.' : 'This browser can’t open folders, so add photos directly instead.'));
   for (const f of L.folders.values()) { const n = L.ids.filter((id) => L.meta.get(id)?.folder === f.id).length;
     folders.append(h('div', { class: 'kv', style: 'align-items:center;gap:8px' }, h('span', {}, '📁 ' + f.name), h('span', { style: 'display:flex;gap:6px;align-items:center' }, h('span', { class: 'small' }, fmtN(n) + ' photos'), h('button', { class: 'btn sm', onclick: () => Indexer.scan([f]) }, 'Check for new'), h('button', { class: 'btn sm', onclick: async () => { if (await confirm2(`Remove ${f.name}?`, 'Iris forgets these photos. Your files stay exactly where they are.', 'Remove')) Folders.remove(f); } }, '✕')))); }
-  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => $('#fDir').click() }, '+ Folder, no Chrome pop-up'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), h('button', { class: 'btn sm', onclick: () => Indexer.addSamples() }, 'Add sample photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
+  folders.append(h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Folders.add() }, '+ Add folder'), h('button', { class: 'btn sm', onclick: () => $('#fDir').click() }, '+ Folder, no Chrome pop-up'), h('button', { class: 'btn sm', onclick: () => $('#fPhotos').click() }, '+ Add photos'), L.folders.size > 1 ? h('button', { class: 'btn sm', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check all folders') : ''));
   b.append(folders);
   let est = {}; try { est = await navigator.storage.estimate(); } catch {}
   const cached = await AI.cached();
@@ -1117,10 +1117,10 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.3): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.4): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
-    h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); Indexer.addSamples(); } }, 'Try sample photos'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
+    h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
 }
 $('#obFile').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#fModel').click(); };
 $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); };
@@ -1135,6 +1135,7 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
   for (const [id, f] of await DB.all('folders')) L.folders.set(id, f);
   for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
   UI.pendingScan = !!(await DB.get('kv', 'pendingScan'));
+  { const smp = L.ids.filter((id) => id.startsWith('sample:')); if (smp.length) { await DB.removeItems(smp); smp.forEach((id) => L.meta.delete(id)); L.rebuild(); Log.add('info', 'removed sample photos', smp.length); } } // samples are gone for good
   renderSearchChips(); renderSearch(); renderPickSrc(); UI.binCount(); UI.renderIndex();
   const rot = ['Describe a photo…', 'golden hour at the beach', 'mi perro durmiendo', 'birthday cake with candles', 'old books on a table', 'beach -people'];
   let ri = 0; setInterval(() => { if (!S.img && document.activeElement !== $('#q')) $('#q').placeholder = rot[ri++ % rot.length]; }, 3500);
