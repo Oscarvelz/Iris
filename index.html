@@ -283,7 +283,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.5</p>
+    <p class="small">Iris 2.6</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.5';
+const VER = 'Iris 2.6';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -592,13 +592,20 @@ const Folders = {
   async add() {
     if (!this.supported) { $('#fPhotos').click(); return; }
     if (this._picking) return; this._picking = true; // a second tap while Android's picker is opening used to throw 'File picker already active'
-    let handle; try { handle = await window.showDirectoryPicker({ id: 'iris', mode: 'read', startIn: 'pictures' }); } catch (e) { if (e.name !== 'AbortError' && !/already active/i.test(e.message)) toast('Could not open that folder: ' + e.message); return; } finally { this._picking = false; }
-    for (const f of L.folders.values()) { try { if (await f.handle.isSameEntry(handle)) { toast('That folder is already in Iris. Checking for new photos.'); return Indexer.scan([f]); } } catch {} }
+    let handle; try { handle = await window.showDirectoryPicker({ id: 'iris', mode: 'read', startIn: 'pictures' }); } catch (e) { if (e.name !== 'AbortError' && !/already active/i.test(e.message)) toast('Could not open that folder: ' + e.message); if (this.pending?.length) this.basket(); return; } finally { this._picking = false; }
+    for (const f of L.folders.values()) { try { if (await f.handle.isSameEntry(handle)) { if (!this.pending?.some((p) => p.id === f.id)) this.pending = [...(this.pending || []), f]; toast(f.name + ' is already in Iris. It will be checked for new photos.'); return this.basket(); } } catch {} }
+    for (const p of this.pending || []) { try { if (await p.handle.isSameEntry(handle)) return this.basket(); } catch {} }
     const f = { id: 'f' + Date.now().toString(36), name: handle.name, handle, added: Date.now(), lastScan: 0 };
     await DB.put('folders', f.id, f); L.folders.set(f.id, f); UI.renderLib(); this.pending = [...(this.pending || []), f];
-    const names = this.pending.map((x) => x.name).join(', ');
-    Modal.open(h('div', {}, h('h2', {}, '📁 Added ' + f.name), h('p', { class: 'sub' }, 'Ready to read: ' + names + '. Add more folders now, so Iris reads them all in one go.'),
-      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); this.add(); } }, '+ Add another folder'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); const p = this.pending; this.pending = []; Indexer.scan(p); } }, 'Done, read them'))));
+    this.basket();
+  },
+  // Android lets a page pick one folder at a time (and never the storage root), so Iris collects several picks
+  // in a basket and reads them all in one go.
+  basket() {
+    const p = this.pending || []; if (!p.length) { Modal.close(); return; }
+    const chips = h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px' }, ...p.map((f) => h('span', { class: 'chip', style: 'white-space:nowrap' }, '📁 ' + f.name, h('button', { style: 'background:none;border:0;color:inherit;font-size:16px;padding:0 0 0 8px;cursor:pointer', 'aria-label': 'Remove ' + f.name, onclick: async () => { this.pending = p.filter((x) => x !== f); if (!f.lastScan && !L.ids.some((id) => L.meta.get(id)?.folder === f.id)) { await DB.del('folders', f.id); L.folders.delete(f.id); UI.renderLib(); } this.basket(); } }, '×'))));
+    Modal.open(h('div', {}, h('h2', {}, p.length === 1 ? '1 folder selected' : p.length + ' folders selected'), h('p', { class: 'sub' }, 'Add every folder you want, then read them all at once. Android opens one folder per pick.'), chips,
+      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); this.add(); } }, '+ Add another folder'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); const q = this.pending; this.pending = []; Indexer.scan(q); } }, p.length === 1 ? 'Read this folder' : 'Read all ' + p.length))));
   },
   async remove(f) {
     const ids = L.ids.filter((id) => L.meta.get(id)?.folder === f.id); await DB.removeItems(ids); ids.forEach((id) => L.meta.delete(id)); L.rebuild();
@@ -1118,7 +1125,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.5): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.6): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when Chrome asks.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
