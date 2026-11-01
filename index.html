@@ -283,7 +283,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
     <button class="btn pri" id="obGo" style="width:100%;padding:16px;font-size:16px">Download AI and start</button>
     <div style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="obFile" style="flex:1">I have the model file</button><button class="btn" id="obSkip" style="flex:1">Look around first</button></div>
     <p class="small" style="margin-top:18px">Search works in English, Spanish and 100+ languages. Google's MediaPipe library may send anonymous usage metrics; your photos never leave the device.</p>
-    <p class="small">Iris 2.7</p>
+    <p class="small">Iris 2.8</p>
   </div>
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
@@ -315,7 +315,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.7';
+const VER = 'Iris 2.8';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1064,7 +1064,7 @@ async function renderLib() {
     h('div', { class: 'kv' }, h('span', {}, 'Status'), h('span', {}, AI.state === 'ok' ? 'Running' : cached ? 'Downloaded, not loaded' : 'Not downloaded')),
     h('div', { class: 'kv' }, h('span', {}, 'Speed'), h('span', {}, AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : '—')),
     h('div', { class: 'kv' }, h('span', {}, 'Storage used'), h('span', {}, est.usage ? fmtMB(est.usage) : '—')),
-    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, AI.state !== 'ok' ? h('button', { class: 'btn pri sm', onclick: () => ensureAI() }, cached ? 'Load AI' : `Download AI (${MODEL_MB} MB)`) : '', h('button', { class: 'btn sm', onclick: () => $('#fModel').click() }, 'Load model from file'),
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, AI.state !== 'ok' ? h('button', { class: 'btn pri sm', onclick: () => ensureAI() }, cached ? 'Load AI' : `Download AI (${MODEL_MB} MB)`) : '', !cached && AI.state === 'err' ? h('button', { class: 'btn sm', onclick: () => $('#fModel').click() }, 'Load model from file') : '', // only a rescue for when the download fails
       cached ? h('button', { class: 'btn sm', onclick: async () => { if (await confirm2('Delete the downloaded AI?', 'You’ll need to download it again to search or add photos.', 'Delete', true)) { await caches.delete('iris-model-v2'); toast('Model deleted'); renderLib(); } } }, 'Delete model') : '')));
   const diag = h('pre', { style: 'white-space:pre-wrap;font-size:11px;max-height:220px;overflow:auto;background:#0004;padding:10px;border-radius:10px;margin:10px 0 0;color:var(--mute)' }, Log.lines.slice(-25).join('\n') || 'Nothing logged yet.');
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Diagnostics · ' + VER), h('p', { class: 'small' }, 'If something misbehaves, tap Copy report and paste it to Hark.'), diag,
@@ -1133,7 +1133,7 @@ $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) =
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.7): ' + e.message, 6000); } };
+$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (Iris 2.8): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
