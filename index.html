@@ -330,7 +330,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.20';
+const VER = 'Iris 2.22';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -980,6 +980,7 @@ async function addToColl(ids) {
   Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { c.ids = [...new Set([...c.ids, ...ids])]; await DB.put('colls', c.id, c); Modal.close(); toast(`Added ${ids.length} to ${c.name}`); } }, '★ ' + c.name)),
     h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(); saveCollDialog(ids); } }, '+ New collection')));
 }
+const SUGG_DECOY = ['a portrait photo of a person', 'a product photo of an object on a white background', 'a document, card or text on paper', 'a screenshot of a phone screen', 'a wristwatch or jewelry'];
 const SUGGEST = [['🌅', 'Sunsets', 'a beautiful sunset or sunrise sky'], ['🍽️', 'Food', 'a plate of delicious food'], ['🐶', 'Pets', 'a dog or a cat'], ['🏖️', 'Beach', 'the beach and the ocean'], ['🌃', 'Night city', 'city lights at night'], ['🤳', 'Selfies', 'a selfie of a person'], ['⛰️', 'Nature', 'mountains, forests and nature'], ['🎉', 'Celebrations', 'a party or celebration with friends'], ['📚', 'Books & art', 'books, art and museums'], ['🚗', 'Cars', 'a car']];
 const Sugg = { cache: null };
 async function renderColl() {
@@ -993,7 +994,10 @@ async function renderColl() {
   body.append(h('h2', {}, 'Suggested for you'), h('p', { class: 'sub' }, 'Found automatically. Tap one to explore, then save it if you like it.'));
   const cards = h('div', { class: 'cards' }); body.append(cards);
   if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + SUGGEST[SUGGEST.length - 1][2]))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
-  if (!Sugg.cache || Sugg.cache.n !== L.count) { const list = []; for (const [ic, name, q] of SUGGEST) { let v; try { v = await AI.text(q); } catch { continue; } await sleep(0); list.push({ ic, name, q, ids: await collMembers({ type: 'smart', vec: v, z: 2.2 }) }); } Sugg.cache = { n: L.count, list }; }
+  const sKey = L.count + ':' + L.live().length; if (!Sugg.cache || Sugg.cache.n !== sKey) { const ids = L.live(); const cats = []; for (const [ic, name, q] of SUGGEST) { try { cats.push({ ic, name, q, sc: scoreAll(Float32Array.from(await AI.text(q)), ids) }); } catch {} await sleep(0); }
+      const decoys = []; for (const q of SUGG_DECOY) { try { decoys.push(scoreAll(Float32Array.from(await AI.text(q)), ids)); } catch {} await sleep(0); }
+      const list = cats.map((c) => { const st = stats(c.sc); const out = []; for (let i = 0; i < ids.length; i++) { const v = c.sc[i]; if ((v - st.mean) / st.sd < 2.2) continue; if (cats.some((o) => o !== c && o.sc[i] > v) || decoys.some((d) => d[i] > v)) continue; out.push({ id: ids[i], s: v }); } out.sort((a, b) => b.s - a.s); return { ic: c.ic, name: c.name, q: c.q, ids: out.map((r) => r.id) }; });
+      Sugg.cache = { n: sKey, list }; }
   if (tok !== RT_.coll) return;
   for (const { ic, name, q, ids } of Sugg.cache.list) {
     if (ids.length < 2) continue;
@@ -1100,6 +1104,7 @@ let sx = null; $('#vPic').addEventListener('pointerdown', (e) => sx = e.clientX)
 document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
 
 /* ---------------- Back button ---------------- */
+window.IrisBack = () => { try { return Back.handler(); } catch (e) { return false; } };
 const Back = {
   push() { history.pushState({ iris: 1 }, ''); },
   handler() { if ($('#viewer').classList.contains('on')) { Viewer.close(true); return true; } if ($('#modal').classList.contains('on')) { Modal.close(true); return true; } if (Sel.on) { endSel(); return true; } if (cur !== 'search') { go('search'); return true; } return false; },

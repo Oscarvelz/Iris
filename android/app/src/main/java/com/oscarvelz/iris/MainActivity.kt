@@ -194,5 +194,14 @@ class MainActivity : Activity() {
     override fun onResume() { super.onResume(); if (::web.isInitialized) web.evaluateJavascript("dispatchEvent(new Event('irisnative-resume'))", null) }
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); web.saveState(out) }
     @Deprecated("Deprecated in Java")
-    override fun onBackPressed() { if (web.canGoBack()) web.goBack() else @Suppress("DEPRECATION") super.onBackPressed() }
+    private var lastBack = 0L
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        web.evaluateJavascript("(window.IrisBack && IrisBack()) ? 'y' : 'n'") { r ->
+            if (r != null && r.contains("y")) return@evaluateJavascript
+            val now = System.currentTimeMillis()
+            if (now - lastBack < 2000) finish()
+            else { lastBack = now; Toast.makeText(this, "Press back again to close Iris", Toast.LENGTH_SHORT).show() }
+        }
+    }
 }
