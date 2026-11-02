@@ -330,7 +330,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.18';
+const VER = 'Iris 2.19';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1095,7 +1095,7 @@ $('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); 
 $('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id, true); };
 $('#vColl').onclick = () => addToColl([Viewer.list[Viewer.i]]);
 $('#vShare').onclick = () => shareIds([Viewer.list[Viewer.i]]);
-$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); await setStatus([id], m.status === 'trash' ? null : 'trash'); toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.show(); };
+$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); await setStatus([id], m.status === 'trash' ? null : 'trash'); toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.list = Viewer.list.filter((x) => x !== id); if (!Viewer.list.length) return Viewer.close(); if (Viewer.i >= Viewer.list.length) Viewer.i = Viewer.list.length - 1; Viewer.show(); };
 let sx = null; $('#vPic').addEventListener('pointerdown', (e) => sx = e.clientX); $('#vPic').addEventListener('pointerup', (e) => { if (sx != null && Math.abs(e.clientX - sx) > 60) Viewer.step(e.clientX < sx ? 1 : -1); sx = null; });
 document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
 
