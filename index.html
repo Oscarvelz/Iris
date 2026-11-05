@@ -76,7 +76,7 @@ h2{font-size:19px;margin:22px 0 10px;letter-spacing:-.2px}
 .tile img.ld{opacity:1}
 @media(hover:hover){.tile:hover img{transform:scale(1.04)}}
 button,.tile,.chip{touch-action:manipulation}
-.grid{content-visibility:auto}
+.tile{content-visibility:auto;contain-intrinsic-size:auto 120px}
 .tile .badge{position:absolute;left:6px;top:6px;padding:2px 7px;border-radius:8px;font-size:11px;font-weight:700;background:rgba(0,0,0,.7)}
 .tile .badge.best{background:linear-gradient(120deg,#ffcf5a,#ff8a3d);color:#1a1000}
 .tile .num{position:absolute;right:6px;bottom:6px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:800;background:var(--grad)}
@@ -151,6 +151,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 #selbar .st{display:flex;align-items:center;gap:6px;padding:0 0 4px 10px}
 #selbar .n{flex:1;font-weight:700;white-space:nowrap}
 #selbar .sall{font-size:13px;color:var(--mute);padding:8px 10px;border-radius:10px}
+#selbar .srng.on{background:var(--grad);color:#fff}
 #selbar .sx{width:36px;height:36px;border-radius:12px}
 #selbar .sacts{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;border-top:1px solid var(--line);padding-top:4px}
 #selbar .sa{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 2px 6px;border-radius:14px;font-size:11.5px;font-weight:600;color:var(--text);min-width:0;white-space:nowrap}
@@ -264,7 +265,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
   </nav>
 </div>
 
-<div id="selbar"><div class="st"><span class="n" id="selN">0 selected</span><button class="sall" data-a="all">Select all</button><button class="iconbtn sx" data-a="close" title="Done">✕</button></div>
+<div id="selbar"><div class="st"><span class="n" id="selN">0 selected</span><button class="sall srng" data-a="range" title="Tap a first and a last photo to select everything between">⇔ Range</button><button class="sall" data-a="all">Select all</button><button class="iconbtn sx" data-a="close" title="Done">✕</button></div>
   <div class="sacts"><button class="sa" data-a="like"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg><span>Similar</span></button><button class="sa" data-a="best"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z"/></svg><span>Best</span></button><button class="sa" data-a="coll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M17.5 14v7M14 17.5h7"/></svg><span>Collect</span></button><button class="sa" data-a="share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 13v6a2 2 0 002 2h10a2 2 0 002-2v-6"/></svg><span>Share</span></button><button class="sa dz" data-a="bin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/></svg><span>Bin</span></button><button class="sa" data-a="restore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg><span>Restore</span></button><button class="sa dz" data-a="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13M10 11l4 5M14 11l-4 5"/></svg><span>Delete</span></button></div>
 </div>
 
@@ -330,7 +331,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.22';
+const VER = 'Iris 2.23';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -359,6 +360,7 @@ const DB = {
   del(store, key) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   all(store) { return new Promise((res, rej) => { const out = []; const q = this.tx([store]).objectStore(store).openCursor(); q.onsuccess = () => { const c = q.result; if (c) { out.push([c.key, c.value]); c.continue(); } else res(out); }; q.onerror = () => rej(q.error); }); },
   saveItem(m, thumb, vec) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  putMetas(ms) { return new Promise((res, rej) => { if (!ms.length) return res(); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); for (const m of ms) o.put(m, m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   removeItems(ids) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); for (const id of ids) for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
 };
@@ -547,9 +549,9 @@ async function prep(file) {
 
 /* ---------------- Thumbnails ---------------- */
 const Thumbs = {
-  urls: new Map(), order: [],
-  async url(id) { if (this.urls.has(id)) return this.urls.get(id); const b = await DB.get('thumbs', id); if (!b) return ''; const u = URL.createObjectURL(b); this.urls.set(id, u); this.order.push(id); if (this.order.length > 1500) { const old = this.order.shift(); if (!$$(`img[data-id="${CSS.escape(old)}"]`).length) { URL.revokeObjectURL(this.urls.get(old)); this.urls.delete(old); } else this.order.push(old); } return u; },
-  io: new IntersectionObserver((ents) => { for (const e of ents) if (e.isIntersecting) { const img = e.target; Thumbs.io.unobserve(img); Thumbs.url(img.dataset.id).then((u) => { if (u) { img.onload = () => img.classList.add('ld'); img.src = u; } }); } }, { rootMargin: '600px' }),
+  urls: new Map(), order: [], imgs: new Map(),
+  async url(id) { if (this.urls.has(id)) return this.urls.get(id); const b = await DB.get('thumbs', id); if (!b) return ''; const u = URL.createObjectURL(b); this.urls.set(id, u); this.order.push(id); if (this.order.length > 1500) { const old = this.order.shift(); if (!this.imgs.get(old)?.isConnected) { this.imgs.delete(old); URL.revokeObjectURL(this.urls.get(old)); this.urls.delete(old); } else this.order.push(old); } return u; },
+  io: new IntersectionObserver((ents) => { for (const e of ents) if (e.isIntersecting) { const img = e.target; Thumbs.io.unobserve(img); Thumbs.imgs.set(img.dataset.id, img); Thumbs.url(img.dataset.id).then((u) => { if (u) { img.onload = () => img.classList.add('ld'); img.src = u; } }); } }, { rootMargin: '600px' }),
 };
 
 /* ---------------- Grid ---------------- */
@@ -572,7 +574,7 @@ function tile(id, i, list, opts) {
   t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); } });
   t.addEventListener('pointerup', () => clearTimeout(lp)); t.addEventListener('pointercancel', () => clearTimeout(lp));
   t.addEventListener('contextmenu', (e) => e.preventDefault());
-  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) { Sel.anchor = { list, i }; return toggleSel(id, t); } Viewer.open(list, i); });
+  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) { if (Sel.range) return rangeTap(id, i, list, t); Sel.anchor = { list, i }; return toggleSel(id, t); } Viewer.open(list, i); });
   return t;
 }
 /* Smart selection: long-press then drag paints a range (auto-scrolls at the edges);
@@ -604,16 +606,22 @@ function dragAuto() {
 const dragTouch = (e) => { if (!Drag.on) return; e.preventDefault(); const p = e.touches[0]; dragTo(p.clientX, p.clientY); if (!Drag.raf) Drag.raf = requestAnimationFrame(dragAuto); };
 document.addEventListener('pointermove', (e) => { if (!Drag.on || e.pointerType === 'touch') return; dragTo(e.clientX, e.clientY); if (!Drag.raf) Drag.raf = requestAnimationFrame(dragAuto); });
 for (const ev of ['touchend', 'touchcancel', 'pointerup', 'pointercancel']) document.addEventListener(ev, (e) => { if (Drag.on && !(ev.startsWith('pointer') && e.pointerType === 'touch' && ev === 'pointercancel')) dragEnd(); });
+function setRange(on) { Sel.range = on; Sel.rStart = null; $('#selbar [data-a=range]').classList.toggle('on', on);
+  if (on) { const a = Sel.anchor; if (a && Sel.set.has(a.list[a.i])) { Sel.rStart = a; toast('Start set on your last photo. Now tap the last one of the range.', 3000); } else toast('Range on: tap the first photo, then the last one.', 3000); } }
+function rangeTap(id, i, list, t) {
+  const a = Sel.rStart; if (!a || a.list !== list) { Sel.set.add(id); t.classList.add('sel'); Sel.rStart = Sel.anchor = { list, i }; updSel(); return toast('Start set. Now tap the last photo.', 2500); }
+  const [lo, hi] = a.i < i ? [a.i, i] : [i, a.i]; for (let k = lo; k <= hi; k++) Sel.set.add(list[k]); Sel.anchor = { list, i }; Sel.rStart = null; paintSel(list); updSel(); navigator.vibrate?.(15);
+  toast(`Selected ${fmtN(hi - lo + 1)} in a row. Tap another photo to start a new range.`, 3000); }
 function startSel() { if (Sel.on) return; Sel.on = true; $$('.grid').forEach((g) => g.classList.add('selmode')); updSel(); }
 function toggleSel(id, t) { if (Sel.set.has(id)) Sel.set.delete(id); else Sel.set.add(id); t?.classList.toggle('sel', Sel.set.has(id)); updSel(); }
-function endSel() { Sel.on = false; Sel.set.clear(); Sel.anchor = null; dragEnd(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
+function endSel() { Sel.on = false; Sel.set.clear(); Sel.anchor = null; if (Sel.range) setRange(false); dragEnd(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
 function updSel() { $('#selbar').classList.toggle('on', Sel.on); $('#selN').textContent = Sel.set.size + ' selected';
   const inBin = cur === 'bin' || (Sel.set.size > 0 && [...Sel.set].every((id) => L.meta.get(id)?.status === 'trash'));
   for (const a of ['like', 'best', 'coll', 'bin']) $(`#selbar [data-a=${a}]`).classList.toggle('hide', inBin);
   for (const a of ['restore', 'del']) $(`#selbar [data-a=${a}]`).classList.toggle('hide', !inBin); }
 
 /* ---------------- Status (bin) ---------------- */
-async function setStatus(ids, status) { for (const id of ids) { const m = L.meta.get(id); if (!m) continue; m.status = status; await DB.put('meta', id, m); } UI.binCount(); }
+async function setStatus(ids, status) { const ms = []; for (const id of ids) { const m = L.meta.get(id); if (!m) continue; m.status = status; ms.push(m); } await DB.putMetas(ms); UI.binCount(); }
 
 /* ---------------- Native shell (Iris for Android) ----------------
    Inside the shell, Android gives Iris "All files access" once, for good. These handles act like the browser's
@@ -1123,6 +1131,7 @@ function confirm2(title, text, okText, danger) { return new Promise((res) => { c
 $('#selbar').addEventListener('click', async (e) => {
   const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set];
   if (a === 'close') return endSel();
+  if (a === 'range') return setRange(!Sel.range);
   if (a === 'all') { [...$$('.view.on .grid')].flatMap((g) => g._ids || []).forEach((id) => Sel.set.add(id)); $$('.view.on .tile').forEach((t) => t.classList.toggle('sel', Sel.set.has(t.dataset.id))); return updSel(); }
   if (!ids.length) return toast('Select some photos first.');
   if (a === 'bin') { await setStatus(ids, 'trash'); endSel(); UI.refreshLight(); toast(`Moved ${ids.length} to the bin. Open 🗑 at the top to delete them for good.`, 3500); }
@@ -1236,7 +1245,7 @@ const UI = {
   onModelReady() { if ($('#v-coll').classList.contains('on')) renderColl(); UI.renderIndex(); if (Indexer.queue.length && !Indexer.running) Indexer.start(); },
   onModelProgress(p, got, total) { const el = $('#obGo'); if (el) el.textContent = `Downloading… ${p}% (${fmtMB(got)} of ${fmtMB(total)})`; },
   indexStatus(t) { this._st = t; this.renderIndex(); },
-  renderIndex() {
+  renderIndex() { const now = performance.now(), I0 = Indexer; if (I0.running && !I0.paused && now - (this._ri || 0) < 1000) { if (!this._riT) this._riT = setTimeout(() => { this._riT = 0; this.renderIndex(); }, 1000); return; } this._ri = now; clearTimeout(this._riT); this._riT = 0;
     const card = $('#idxCard'); const ban = $('#sbanner');
     const I = Indexer; const left = I.total - I.done; const el = (performance.now() - I.t0) / 1000; const rate = I.done / Math.max(el, .001); const eta = left / Math.max(rate, 1e-6);
     const html = () => { const c = h('div', { class: 'card', style: 'margin-bottom:14px' });
