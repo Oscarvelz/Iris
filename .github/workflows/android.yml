@@ -1,4 +1,5 @@
 name: Iris for Android
+# The signing key is NOT in this repo. CI signs only with the repository secrets IRIS_KS_B64 (base64 PKCS12) and IRIS_KS_PASS.
 on:
   push:
     branches: [main]
@@ -15,10 +16,22 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: '8.9' }
+      - name: Signing key (from repository secrets only)
+        env:
+          KS_B64: ${{ secrets.IRIS_KS_B64 }}
+          KS_PASS: ${{ secrets.IRIS_KS_PASS }}
+        run: |
+          if [ -z "$KS_B64" ] || [ -z "$KS_PASS" ]; then echo "::error::IRIS_KS_B64 / IRIS_KS_PASS secrets are missing; refusing to build an unsigned or insecure APK."; exit 1; fi
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/iris.p12"
       - name: Build
         working-directory: android
         run: gradle assembleRelease --no-daemon --stacktrace
-        env: { KS_PASS: '44826606c704d504e86aa7e0584ecb02', VERSION_CODE: '${{ github.run_number }}' }
+        env:
+          KS_FILE: ${{ runner.temp }}/iris.p12
+          KS_PASS: ${{ secrets.IRIS_KS_PASS }}
+          VERSION_CODE: ${{ github.run_number }}
+      - run: rm -f "$RUNNER_TEMP/iris.p12"
+        if: always()
       - run: cp android/app/build/outputs/apk/release/app-release.apk Iris.apk
       - uses: softprops/action-gh-release@v2
         with:

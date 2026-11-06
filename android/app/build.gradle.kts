@@ -15,7 +15,7 @@ android {
     }
     signingConfigs {
         create("rel") {
-            storeFile = file("../iris.p12")
+            storeFile = file(System.getenv("KS_FILE") ?: error("KS_FILE not set: signing key comes only from CI secrets"))
             storePassword = System.getenv("KS_PASS")
             keyAlias = "iris"
             keyPassword = System.getenv("KS_PASS")
