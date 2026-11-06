@@ -16,7 +16,7 @@
   --a1:#7c5cff; --a2:#28d2e6; --a3:#ff5a96; --ok:#4ade80; --bad:#ff5a6e; --warn:#ffb85a;
   --grad:linear-gradient(120deg,var(--a1),var(--a2));
   --r:18px; --tile:118px;
-  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-b:min(env(safe-area-inset-bottom,0px),40px);
 }
 @media (max-width:520px){:root{--tile:96px}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -337,7 +337,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.26';
+const VER = 'Iris 2.27';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -501,6 +501,9 @@ const AI = {
 
 /* ---------------- Image analysis (in background workers) ---------------- */
 const NATIVE = !!window.IrisNative; // running inside the Iris for Android shell
+// The shell is not edge-to-edge: Android keeps its bars outside the window, so no bottom inset is needed.
+// In Samsung pop-up view the WebView reports the gap to the screen bottom as an inset, which pushed the nav up.
+if (NATIVE) document.documentElement.style.setProperty('--safe-b', '0px');
 const IS_EDGE = /\bEdgA?\//.test(navigator.userAgent) || NATIVE; // both: hide the webkitdirectory trick
 const Prep = {
   // Worker pool. HEIC decoding (libheif WASM) grows each worker's memory and it never shrinks, so a worker is
@@ -1284,7 +1287,7 @@ const UI = {
       else return null; return c; };
     if (card) { card.innerHTML = ''; const c = html(); if (c) card.append(c); }
     if (ban) { ban.innerHTML = ''; if (I.scanning && !I.done) ban.append(h('div', { class: 'banner' }, h('span', {}, `📁 Reading ${I.scanning}… ${fmtN(I.found)} photos found`)));
-      else if (I.running) ban.append(h('div', { class: 'banner' }, h('span', {}, `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' (still finding more)' : `, about ${fmtDur(eta)} left`)), h('span', { class: 'sp' }), h('button', { class: 'btn sm', title: 'How hard Iris works your phone while indexing', onclick: () => Indexer.cycleSpeed() }, Indexer.speedLabel()), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
+      else if (I.running) ban.append(h('div', { class: 'banner' }, h('span', { style: 'min-width:0' }, innerWidth < 600 ? `✦ ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' · finding more' : ` · ${fmtDur(eta)} left`) : `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' (still finding more)' : `, about ${fmtDur(eta)} left`)), h('span', { class: 'sp' }), h('button', { class: 'btn sm', title: 'How hard Iris works your phone while indexing', onclick: () => Indexer.cycleSpeed() }, Indexer.speedLabel()), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
       else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
       else if (AI.state === 'busy' && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, 'Getting the AI ready. This takes up to a minute the first time…')));
       else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
