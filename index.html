@@ -147,7 +147,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 #viewer .nv{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:64px;border-radius:14px;background:rgba(255,255,255,.06);display:grid;place-items:center;font-size:26px}
 #viewer .nv.l{left:10px}#viewer .nv.r{right:10px}
 #viewer .vacts{display:flex;gap:8px;overflow-x:auto;padding:12px 14px calc(14px + var(--safe-b));justify-content:center;flex-wrap:wrap}
-.toast{position:fixed;left:50%;bottom:calc(96px + var(--safe-b));transform:translateX(-50%) translateY(20px);opacity:0;padding:12px 18px;border-radius:14px;background:#1d1d2c;border:1px solid var(--line);box-shadow:0 20px 50px rgba(0,0,0,.5);z-index:40;transition:.25s;font-size:14px;max-width:90%;pointer-events:none}
+.toast{position:fixed;left:50%;bottom:calc(96px + var(--safe-b));transform:translateX(-50%) translateY(20px);opacity:0;padding:12px 18px;border-radius:14px;background:#1d1d2c;border:1px solid var(--line);box-shadow:0 20px 50px rgba(0,0,0,.5);z-index:50;transition:.25s;font-size:14px;max-width:90%;pointer-events:none}
 .toast.on{opacity:1;transform:translateX(-50%)}
 #selbar{position:fixed;left:50%;bottom:calc(84px + var(--safe-b));transform:translateX(-50%) translateY(30px);opacity:0;visibility:hidden;pointer-events:none;z-index:15;width:min(520px,calc(100% - 20px));padding:8px 8px 6px;border-radius:22px;background:rgba(25,25,38,.92);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid var(--line);box-shadow:0 20px 60px rgba(0,0,0,.6);transition:.25s}
 #selbar.on{transform:translateX(-50%);opacity:1;visibility:visible;pointer-events:auto}
@@ -167,6 +167,8 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 #binBtn b:empty{display:none}
 /* onboarding */
 #modal{z-index:35}
+#viewer{z-index:40}
+#selbar{z-index:37}
 #onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(124,92,255,.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(40,210,230,.18),transparent 60%),var(--bg);overflow:auto}
 .ob{max-width:620px;margin:0 auto;padding:60px 24px 40px;text-align:center}
 .ob img.hero{width:120px;height:120px;border-radius:30px;box-shadow:0 30px 80px rgba(124,92,255,.45);animation:float 5s ease-in-out infinite}
@@ -335,7 +337,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.24';
+const VER = 'Iris 2.25';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
