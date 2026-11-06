@@ -5,7 +5,9 @@ import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Bundle
@@ -16,6 +18,7 @@ import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.net.HttpURLConnection
@@ -77,9 +80,21 @@ class MainActivity : Activity() {
         val f = p?.let { File(it) }
         if (f == null || !inside(f.path) || !f.isFile)
             return WebResourceResponse("text/plain", "utf-8", 404, "Not found", hdr, ByteArrayInputStream(ByteArray(0)))
+        if (r.url.path == "/v") viewCopy(f, r.url.getQueryParameter("w")?.toIntOrNull() ?: 2048)?.let {
+            return WebResourceResponse("image/jpeg", null, 200, "OK", hdr + ("Cache-Control" to "max-age=600"), ByteArrayInputStream(it)) }
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "application/octet-stream"
         return WebResourceResponse(mime, null, 200, "OK", hdr, FileInputStream(f))
     }
+
+    /** Screen-sized JPEG for the viewer, decoded by Android itself (fast, hardware HEIC, EXIF rotation applied). */
+    private fun viewCopy(f: File, w: Int): ByteArray? = runCatching {
+        val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(f)) { d, info, _ ->
+            val m = maxOf(info.size.width, info.size.height)
+            if (m > w) { val k = w.toFloat() / m; d.setTargetSize(maxOf(1, (info.size.width * k).toInt()), maxOf(1, (info.size.height * k).toInt())) }
+            d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+        ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it); bmp.recycle() }.toByteArray()
+    }.getOrNull()
 
     private fun inside(p: String) = runCatching { val c = File(p).canonicalPath; c == root || c.startsWith("$root/") }.getOrDefault(false)
 
@@ -90,6 +105,7 @@ class MainActivity : Activity() {
             catch (e: Exception) { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
         }
         @JavascriptInterface fun root(): String = JSONObject.quote(root)
+        @JavascriptInterface fun fast(): Boolean = true
         @JavascriptInterface fun version(): String = BuildConfig.VERSION_NAME
         @JavascriptInterface fun list(p: String): String {
             val a = JSONArray()

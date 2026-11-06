@@ -337,7 +337,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.25';
+const VER = 'Iris 2.26';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -581,7 +581,7 @@ function tile(id, i, list, opts) {
   if (opts.num) t.append(h('span', { class: 'num' }, String(i + 1)));
   if (opts.loc) { const pr = isProt(id); t.append(h('span', { class: 'loc' + (pr ? ' prot' : ''), title: locParts(id).join('/') }, (pr ? '🔒 ' : '📁 ') + locLabel(id))); }
   let lp, moved = false, longFired = false;
-  t.addEventListener('pointerdown', (e) => { moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); });
+  t.addEventListener('pointerdown', (e) => { if (!opts.onTap && !Sel.on) Viewer.warm(id); moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); });
   t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); } });
   t.addEventListener('pointerup', () => clearTimeout(lp)); t.addEventListener('pointercancel', () => clearTimeout(lp));
   t.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1096,20 +1096,35 @@ async function deleteFromDevice(ids) {
 
 /* ---------------- Viewer ---------------- */
 const Viewer = {
-  list: [], i: 0, fullUrl: null,
+  list: [], i: 0, fullUrl: null, cache: new Map(),
   open(list, i) { this.list = list; this.i = i; $('#viewer').classList.add('on'); this.show(); },
-  close() { $('#viewer').classList.remove('on'); if (this.fullUrl) URL.revokeObjectURL(this.fullUrl); this.fullUrl = null; },
+  close() { $('#viewer').classList.remove('on'); },
+  fastNative() { try { return NATIVE && typeof window.IrisNative?.fast === 'function'; } catch { return false; } },
+  natPath(id) { const m = L.meta.get(id), f = m && L.folders.get(m.folder); const r = f?.handle?.__native; return r ? [r, ...m.path, m.name].join('/') : null; },
+  // Full-quality copy, decoded before it is shown, cached for the photos around the current one.
+  full(id) {
+    if (this.cache.has(id)) { const c = this.cache.get(id); this.cache.delete(id); this.cache.set(id, c); return c.p; }
+    const c = { url: null, blob: false }; c.p = (async () => {
+      let u = null; const np = this.fastNative() && this.natPath(id);
+      if (np) u = NAT_URL.replace('/f?', '/v?') + encodeURIComponent(np) + '&w=' + Math.min(2560, Math.round(Math.max(innerWidth, innerHeight) * (devicePixelRatio || 1)));
+      else { const f = await Folders.fileFor(id, false); if (!f) return null; let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
+      c.url = u; const im = new Image(); im.src = u; try { await im.decode(); } catch { if (np) { this.cache.delete(id); return null; } } c.im = im; return u; })();
+    this.cache.set(id, c); while (this.cache.size > 7) { const [k, o] = this.cache.entries().next().value; this.cache.delete(k); if (o.blob) o.p.then(() => o.url && URL.revokeObjectURL(o.url)); }
+    return c.p;
+  },
+  warm(id) { if (L.meta.has(id)) this.full(id).catch(() => {}); },
   async show() {
     const id = this.list[this.i]; const m = L.meta.get(id); if (!m) return;
-    if (this.fullUrl) { URL.revokeObjectURL(this.fullUrl); this.fullUrl = null; }
-    $('#vImg').src = await Thumbs.url(id);
+    const c = this.cache.get(id); const img = $('#vImg');
+    if (c?.im && c.url) img.src = c.url; else img.src = await Thumbs.url(id);
     const d = new Date(m.mtime); $('#vTitle').textContent = `${m.name} · ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })} · ${m.w}×${m.h}` + (m.size ? ' · ' + fmtMB(m.size) : '');
     $('#vBin').textContent = m.status === 'trash' ? 'Restore' : 'Move to bin'; $('#vBin').classList.toggle('danger', m.status !== 'trash');
     $('#vPrev').style.visibility = this.i > 0 ? 'visible' : 'hidden'; $('#vNext').style.visibility = this.i < this.list.length - 1 ? 'visible' : 'hidden';
-    const f = await Folders.fileFor(id, false); $('#vFull').classList.toggle('hide', !!f);
-    if (f && this.list[this.i] === id) await this.showFile(f, id);
+    const u = await this.full(id).catch(() => null); $('#vFull').classList.toggle('hide', !!u);
+    if (u && this.list[this.i] === id) img.src = u;
+    for (const k of [1, -1, 2]) { const n = this.list[this.i + k]; if (n) this.warm(n); }
   },
-  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b || this.list[this.i] !== id) return; } if (this.fullUrl) URL.revokeObjectURL(this.fullUrl); this.fullUrl = URL.createObjectURL(b); $('#vImg').src = this.fullUrl; },
+  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b || this.list[this.i] !== id) return; } const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); $('#vImg').src = u; },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.show(); },
 };
 $('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.step(-1); $('#vNext').onclick = () => Viewer.step(1);
