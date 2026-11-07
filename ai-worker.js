@@ -22,6 +22,19 @@ async function modelReader(blob) {
 }
 const out = (res) => { const e = res?.embeddings?.[0]; if (!e?.floatEmbedding) throw new Error('No embedding'); return Float32Array.from(e.floatEmbedding); };
 
+async function createEmbedder(fileset, arg, delegate) {
+  const baseOptions = { modelAssetBuffer: await modelReader(arg) };
+  if (delegate) baseOptions.delegate = delegate;
+  return mp.UniversalEmbedder.createFromOptions(fileset, { baseOptions, l2Normalize: true });
+}
+
+// Prove an embedder really works (a delegate can fail on first use, not at creation).
+async function testEmbedder(e) {
+  out(await e.embedText('iris delegate check'));
+  const bmp = await createImageBitmap(new OffscreenCanvas(8, 8));
+  try { out(await e.embedImage(bmp)); } finally { if (bmp.close) bmp.close(); }
+}
+
 onmessage = async ({ data }) => {
   const { id, op, arg } = data;
   try {
@@ -30,7 +43,17 @@ onmessage = async ({ data }) => {
       if (!emb) {
         if (!mp) mp = await import(RT + '/retrieval_bundle.mjs');
         const fileset = await mp.FilesetResolver.forRetrievalTasks(RT + '/wasm', true);
-        emb = await mp.UniversalEmbedder.createFromOptions(fileset, { baseOptions: { modelAssetBuffer: await modelReader(arg) }, l2Normalize: true });
+        // GPU delegate test (2026-11-06): try GPU first and prove it with a real
+        // text+image embed; on ANY failure, fall back to the exact CPU setup Iris
+        // has always used. To undo this test, restore the single createEmbedder
+        // call without a delegate.
+        try {
+          const g = await createEmbedder(fileset, arg, 'GPU');
+          await testEmbedder(g);
+          emb = g;
+        } catch (gpuErr) {
+          emb = await createEmbedder(fileset, arg);
+        }
       }
     } else if (op === 'text') r = out(await emb.embedText(arg));
     else if (op === 'image') r = out(await emb.embedImage(arg));
