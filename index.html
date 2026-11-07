@@ -185,6 +185,49 @@ body.selon #mBody{padding-bottom:170px}
 .small{font-size:12.5px;color:var(--dim)}
 .hide{display:none!important}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--mute)}
+/* Compact heights — floating / pop-up windows and split-screen are far shorter than the full
+   screen, but every breakpoint above keys on width, so a pop-up kept the full-size chrome and
+   left the grid barely two rows. When the window is short, the chrome gives space back to the
+   photos: tighter header and search stack, a slimmer desk, smaller tiles, and main loses the
+   tall bottom pad that otherwise ends every scroll in a dead black band above the desk. */
+@media (max-height:680px){
+  :root{--tile:104px}
+  header{padding:9px 16px 6px}
+  .logo{font-size:19px}.logo img{width:28px;height:28px}
+  .pill{padding:5px 10px}
+  main{padding:0 16px calc(28px + var(--safe-b))}
+  h1{font-size:24px;margin:4px 0 2px}
+  h2{font-size:18px;margin:16px 0 8px}
+  .searchbox{padding:4px 0 6px}
+  .sb{border-radius:18px}
+  .sb input{font-size:16px;padding:7px 0}
+  .chips{padding:6px 0 0}
+  .chip{padding:6px 12px}
+  .bar{margin:5px 0 8px}
+  .nav{padding:5px 6px calc(5px + var(--safe-b))}
+  .nav button{padding:4px 8px;gap:1px;font-size:11px;min-width:54px;border-radius:12px}
+  .nav button svg{width:21px;height:21px}
+  .toast{bottom:calc(74px + var(--safe-b))}
+  #selbar{bottom:calc(66px + var(--safe-b))}
+  .ob{padding:30px 22px}
+}
+@media (max-height:680px) and (max-width:899px){
+  .nav{justify-content:space-evenly}
+  .nav button{flex:1;max-width:128px}
+}
+@media (max-height:680px) and (max-width:520px){:root{--tile:96px}}
+@media (max-height:480px){
+  header{padding:6px 14px 4px}
+  .logo{font-size:17px}.logo img{width:24px;height:24px}
+  .sb input{font-size:15px;padding:5px 0}
+  .chips{padding:4px 0 0}
+  .chip{padding:5px 10px;font-size:12.5px}
+  .nav{padding:4px 6px calc(4px + var(--safe-b))}
+  .nav button{padding:3px 6px;font-size:10.5px;min-width:48px}
+  .nav button svg{width:19px;height:19px}
+  h1{font-size:21px}
+}
+@media (max-height:480px) and (min-width:521px){:root{--tile:92px}}
 </style>
 </head>
 <body>
@@ -341,7 +384,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.29';
+const VER = 'Iris 2.30';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -392,10 +435,20 @@ const Backup = {
     if (!entries.length) { toast('Nothing to back up yet — Iris has not understood any photo.'); return; }
     const head = new TextEncoder().encode(JSON.stringify({ app: 'iris', kind: 'index-backup', v: 1, ver: VER, at: Date.now(), dim: DIM, entries, colls }));
     const pre = new Uint8Array(12); pre.set(new TextEncoder().encode('IRISBAK1')); new DataView(pre.buffer).setUint32(8, head.length, true);
-    const file = new File([pre, head, ...parts], `iris-backup-${new Date().toISOString().slice(0, 10)}.irisbak`, { type: 'application/octet-stream' });
+    const name = `iris-backup-${new Date().toISOString().slice(0, 10)}.irisbak`;
+    const file = new File([pre, head, ...parts], name, { type: 'application/octet-stream' });
+    // The destination is the user's to choose (2.30): the system save dialog first, where the browser offers it;
+    // share next, and the plain download last — and every path says where the file went.
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'Iris backup', accept: { 'application/octet-stream': ['.irisbak'] } }] });
+        const w = await handle.createWritable(); await w.write(file); await w.close();
+        toast(`Backup saved as ${handle.name || name} — keep it somewhere safe.`, 4000); return;
+      } catch (e) { if (e?.name === 'AbortError') return; }
+    }
     if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file] }); toast('Backup shared — keep the file somewhere safe.', 4000); return; } catch (e) { if (e?.name === 'AbortError') return; } }
     const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
-    toast('Backup downloaded — keep the file somewhere safe.', 4000);
+    toast(`Backup downloaded to your Downloads folder as ${name} — keep it somewhere safe.`, 5000);
   },
   async restore(file) {
     try {
