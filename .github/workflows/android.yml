@@ -1,5 +1,13 @@
 name: Iris for Android
-# The signing key is NOT in this repo. CI signs only with the repository secrets IRIS_KS_B64 (base64 PKCS12) and IRIS_KS_PASS.
+# The signing key is NOT in this repo. CI signs only with the secrets
+# IRIS_KS_B64 (base64 PKCS12) and IRIS_KS_PASS, which live as ENVIRONMENT
+# secrets of «release»: the job below declares environment: release, whose
+# required reviewer is Oscarvelz (admin bypass off), so a shell build waits
+# for his approval in the Actions UI before checkout even starts -- no push
+# can turn into a signed release by itself. Oscar loaded the secrets himself
+# from the master key archive; the key never transits chat or any other AI.
+# (They previously sat as plain repository secrets; in an environment job
+# the environment secrets are the ones that resolve.)
 on:
   push:
     branches: [main]
@@ -9,6 +17,7 @@ permissions:
   contents: write
 jobs:
   build:
+    environment: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,7 +25,7 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: '8.9' }
-      - name: Signing key (from repository secrets only)
+      - name: Signing key (from the release-environment secrets only)
         env:
           KS_B64: ${{ secrets.IRIS_KS_B64 }}
           KS_PASS: ${{ secrets.IRIS_KS_PASS }}
