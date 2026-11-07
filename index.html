@@ -313,6 +313,7 @@ body.selon #mBody{padding-bottom:170px}
 </div>
 <input type="file" id="fModel" accept=".litertlm" class="hide">
 <input type="file" id="fPhotos" accept="image/*" multiple class="hide">
+<input type="file" id="fBackup" accept=".irisbak" class="hide">
 <input type="file" id="fDir" webkitdirectory multiple class="hide">
 <div class="toast" id="toast"></div>
 
@@ -340,7 +341,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.28';
+const VER = 'Iris 2.29';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -372,6 +373,81 @@ const DB = {
   putMetas(ms) { return new Promise((res, rej) => { if (!ms.length) return res(); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); for (const m of ms) o.put(m, m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   removeItems(ids) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); for (const id of ids) for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+};
+
+/* ---------------- Backup & restore ----------------
+   One file (.irisbak) with everything that is expensive to rebuild: the AI
+   vectors, the photo data and the collections. Thumbnails are NOT in it —
+   they are cheap and rebuild while a folder is checked. After a restore,
+   Backup.on arms the adoption pass: when Iris meets a photo whose exact id
+   is unknown (a fresh install gives folders new ids, and copied files get
+   new dates), it adopts the backup record with the same path/name+size, so
+   only genuinely new photos go through the AI. */
+const Backup = {
+  on: false, pool: null, left: 0,
+  async export() {
+    const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs'); const colls = await DB.all('colls');
+    const entries = []; const parts = []; let off = 0;
+    for (const [id, buf] of vecs) { const m = metas.get(id); if (!m || !buf) continue; entries.push({ m, o: off, n: buf.byteLength }); parts.push(new Uint8Array(buf)); off += buf.byteLength; }
+    if (!entries.length) { toast('Nothing to back up yet — Iris has not understood any photo.'); return; }
+    const head = new TextEncoder().encode(JSON.stringify({ app: 'iris', kind: 'index-backup', v: 1, ver: VER, at: Date.now(), dim: DIM, entries, colls }));
+    const pre = new Uint8Array(12); pre.set(new TextEncoder().encode('IRISBAK1')); new DataView(pre.buffer).setUint32(8, head.length, true);
+    const file = new File([pre, head, ...parts], `iris-backup-${new Date().toISOString().slice(0, 10)}.irisbak`, { type: 'application/octet-stream' });
+    if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file] }); toast('Backup shared — keep the file somewhere safe.', 4000); return; } catch (e) { if (e?.name === 'AbortError') return; } }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    toast('Backup downloaded — keep the file somewhere safe.', 4000);
+  },
+  async restore(file) {
+    try {
+      const buf = await file.arrayBuffer(); const u = new Uint8Array(buf);
+      if (buf.byteLength < 12 || new TextDecoder().decode(u.subarray(0, 8)) !== 'IRISBAK1') return toast('That is not an Iris backup file.', 5000);
+      const hlen = new DataView(buf).getUint32(8, true); const head = JSON.parse(new TextDecoder().decode(u.subarray(12, 12 + hlen)));
+      if (head.kind !== 'index-backup') return toast('That is not an Iris backup file.', 5000);
+      if (head.dim !== DIM) return toast('This backup came from a different AI model and cannot be restored here.', 6000);
+      const base = 12 + hlen; let n = 0;
+      for (const e of head.entries) { const vec = buf.slice(base + e.o, base + e.o + e.n); await DB.put('meta', e.m.id, e.m); await DB.put('vecs', e.m.id, vec); L.add(e.m, new Float32Array(vec)); n++; }
+      let nc = 0; for (const [id, c] of head.colls || []) if (!L.colls.has(id)) { await DB.put('colls', id, c); L.colls.set(id, c); nc++; }
+      this.on = true; this.pool = null; await DB.put('kv', 'adoptPool', true);
+      UI.binCount(); UI.renderIndex(); if (cur === 'lib') renderLib();
+      toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${nc ? `, ${fmtN(nc)} collections` : ''}. Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
+    } catch (e) { Log.add('ERR', 'restore failed', e.message); toast('Could not restore that backup: ' + e.message, 6000); }
+  },
+  async buildPool() {
+    if (this.pool) return;
+    this.pool = new Map();
+    const vecIds = new Set(await new Promise((res, rej) => { const q = DB.tx(['vecs']).objectStore('vecs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }));
+    const seen = new Set();
+    for (const m of L.meta.values()) { if (!vecIds.has(m.id) || !m.name) continue; seen.add(m.id); for (const k of [`p:${(m.path || []).join('/')}/${m.name}:${m.size}`, `n:${m.name}:${m.size}`]) { if (!this.pool.has(k)) this.pool.set(k, []); this.pool.get(k).push(m); } }
+    this.left = seen.size;
+  },
+  consume(m) { if (!this.pool) return; for (const list of this.pool.values()) { const i = list.indexOf(m); if (i >= 0) list.splice(i, 1); } if (--this.left <= 0) { this.on = false; DB.put('kv', 'adoptPool', false); } },
+  /** spec: {id, name, path, folder, src, file?, getFile?, session?} → true when a backup record was adopted under spec.id. */
+  async adopt(spec) {
+    if (!this.on) return false;
+    try {
+      await this.buildPool();
+      const file = spec.file ?? (spec.getFile ? await spec.getFile() : null); if (!file) return false;
+      const pk = `p:${(spec.path || []).join('/')}/${spec.name}:${file.size}`, nk = `n:${spec.name}:${file.size}`;
+      const cand = this.pool.get(pk)?.[0] || this.pool.get(nk)?.[0]; if (!cand || cand.id === spec.id) return false;
+      const buf = await DB.get('vecs', cand.id); if (!buf) { this.consume(cand); return false; }
+      this.consume(cand);
+      const m = { ...cand, id: spec.id, name: spec.name, path: spec.path || [], folder: spec.folder ?? null, src: spec.src, size: file.size, mtime: file.lastModified || cand.mtime };
+      await DB.put('meta', m.id, m); await DB.put('vecs', m.id, buf);
+      await DB.del('meta', cand.id); await DB.del('vecs', cand.id); await DB.del('thumbs', cand.id);
+      L.meta.delete(cand.id); L.add(m, new Float32Array(buf)); L.rebuild();
+      for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { c.ids[i] = m.id; DB.put('colls', c.id, c); } }
+      if (spec.session) L.session.set(m.id, file);
+      ThumbFix.add(m.id, spec.getFile ?? (async () => file));
+      Log.add('info', 'adopted from backup', spec.name);
+      return true;
+    } catch (e) { Log.add('warn', 'adopt failed', spec.name, e.message); return false; }
+  },
+};
+const ThumbFix = {
+  q: [], busy: false, missing: null,
+  add(id, getFile) { if (getFile) { this.q.push({ id, getFile }); this.run(); } },
+  async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile()); if (p?.thumb) { await DB.put('thumbs', id, p.thumb); any = true; } } catch {} } this.busy = false; if (any) UI.refreshLight(); },
+  async buildMissing() { if (this.missing) return; try { const keys = await new Promise((res, rej) => { const q = DB.tx(['thumbs']).objectStore('thumbs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); const have = new Set(keys); this.missing = new Set(L.ids.filter((id) => !have.has(id))); } catch { this.missing = new Set(); } },
 };
 
 /* ---------------- In-memory library ---------------- */
@@ -793,18 +869,22 @@ const Indexer = {
     if (need.length) await Folders.requestAll(need); // the tap that started this still counts, so ask for every folder in one go
     for (let i = need.length - 1; i >= 0; i--) if (await Folders.perm(need[i], 'read', false)) need.splice(i, 1);
     if (need.length) { const got = await Folders.reconnectAll(need); folders = folders.filter((f) => !need.includes(f) || got.has(f)); if (!folders.length) return; }
+    if (Backup.on) await ThumbFix.buildMissing();
     const add = folders.filter((f) => !(this.later || []).includes(f)); this.later = [...(this.later || []), ...add];
     if (this.scanning) { if (add.length) toast(add.map((f) => f.name).join(', ') + ' will be read right after ' + this.scanning + '.', 4500); return; }
     while (this.later.length) { const f = this.later.shift();
       if (!(await Folders.perm(f, 'read', false))) { toast(`Skipped ${f.name}: no access. Tap Continue to allow it.`, 4500); Log.add('warn', 'scan skipped, no access', f.name); continue; }
       DB.put('kv', 'pendingScan', true); this.scanning = f.name; this.curF = f; this.found = 0; toast(f.lastScan ? `Checking ${f.name} again. Last checked ${fmtAgo(f.lastScan)}, ${fmtN(f.count || 0)} photos.` : `Reading ${f.name}…`, 3500); if (cur === 'lib') renderLib(); UI.renderIndex(); Log.add('info', 'scan start', f.name);
       Folders.stats = { skippedTypes: {}, dirErrors: 0 }; const tS = performance.now();
-      const seen = new Set(); let ok = true, fresh = 0;
+      const seen = new Set(); let ok = true, fresh = 0, adopted = 0;
       try {
         for await (const e of Folders.walk(f.handle)) {
           const id = `${f.id}:${e.path.join('/')}/${e.name}`; seen.add(id); this.found++;
-          if (!L.meta.has(id) && !this.queued.has(id)) { this.queued.add(id); fresh++; this.queue.push({ id, getFile: () => e.h.getFile(), base: { id, name: e.name, path: e.path, folder: f.id, src: 'folder' } });
-            if (fresh === 1) Log.add('info', `first new photo in ${f.name} after ${Math.round(performance.now() - tS)} ms`); if (fresh % 20 === 1) { this.grow(); if (!this.running) this.start(); } }
+          if (!L.meta.has(id) && !this.queued.has(id)) {
+            if (await Backup.adopt({ id, name: e.name, path: e.path, folder: f.id, src: 'folder', getFile: () => e.h.getFile() })) { adopted++; if (adopted % 20 === 1) UI.renderIndex(); }
+            else { this.queued.add(id); fresh++; this.queue.push({ id, getFile: () => e.h.getFile(), base: { id, name: e.name, path: e.path, folder: f.id, src: 'folder' } });
+              if (fresh === 1) Log.add('info', `first new photo in ${f.name} after ${Math.round(performance.now() - tS)} ms`); if (fresh % 20 === 1) { this.grow(); if (!this.running) this.start(); } } }
+          else if (Backup.on && ThumbFix.missing?.has(id)) { ThumbFix.add(id, () => e.h.getFile()); ThumbFix.missing.delete(id); }
           if (this.found % 100 === 0) { UI.renderIndex(); await sleep(0); }
         }
       } catch (err) { ok = false; console.error('scan failed', f.name, err); toast('Couldn’t read ' + f.name + ': ' + err.message + '. Tap Start to reconnect it.', 6000); }
@@ -815,14 +895,14 @@ const Indexer = {
         if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); }
         f.lastScan = Date.now(); f.count = this.found; await DB.put('folders', f.id, f);
       }
-      toast(fresh ? `${f.name}: ${fmtN(fresh)} new photo${fresh === 1 ? '' : 's'} found.` : `${f.name}: checked ${fmtN(this.found)} photos, nothing new.`, 4000);
+      toast(adopted && !fresh ? `${f.name}: ${fmtN(adopted)} photos matched from the backup — nothing to reprocess.` : fresh ? `${f.name}: ${fmtN(fresh)} new photo${fresh === 1 ? '' : 's'} found.` : `${f.name}: checked ${fmtN(this.found)} photos, nothing new.`, 4000);
     }
     this.scanning = ''; this.curF = null; this.grow(); UI.renderIndex(); if (cur === 'lib') renderLib();
     if (!this.running) this.start();
   },
   grow() { if (this.running) this.total = this.done + this.queue.length + 1; },
-  addFiles(files, src = 'pick') {
-    for (const file of files) { if (!file.type.startsWith('image/') && !IMG_RE.test(file.name)) continue; if (file.type.startsWith('video/')) continue; const id = `${src}:${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`; if (L.meta.has(id)) continue; L.session.set(id, file); this.queue.push({ id, getFile: async () => file, base: { id, name: file.name, path: [], folder: null, size: file.size, mtime: file.lastModified, src } }); }
+  async addFiles(files, src = 'pick') {
+    for (const file of files) { if (!file.type.startsWith('image/') && !IMG_RE.test(file.name)) continue; if (file.type.startsWith('video/')) continue; const id = `${src}:${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`; if (L.meta.has(id)) continue; if (await Backup.adopt({ id, name: file.name, path: [], folder: null, src, file, session: true })) continue; L.session.set(id, file); this.queue.push({ id, getFile: async () => file, base: { id, name: file.name, path: [], folder: null, size: file.size, mtime: file.lastModified, src } }); }
     this.grow(); this.start();
   },
   async start() {
@@ -1283,6 +1363,9 @@ async function renderLib() {
   const diag = h('pre', { style: 'white-space:pre-wrap;font-size:11px;max-height:220px;overflow:auto;background:#0004;padding:10px;border-radius:10px;margin:10px 0 0;color:var(--mute)' }, Log.lines.slice(-25).join('\n') || 'Nothing logged yet.');
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Diagnostics · ' + VER), h('p', { class: 'small' }, 'If something misbehaves, tap Copy report and paste it to Hark.'), diag,
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:10px' }, h('button', { class: 'btn sm pri', onclick: async () => { const r = await Log.report(); try { await navigator.clipboard.writeText(r); toast('Report copied. Paste it to Hark.'); } catch { if (navigator.share) navigator.share({ text: r }).catch(() => {}); else toast('Couldn’t copy.'); } } }, 'Copy report'), h('button', { class: 'btn sm', onclick: () => renderLib() }, 'Refresh'))));
+  b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Backup'),
+    h('p', { class: 'small' }, 'One file with everything Iris has learned — the AI vectors, photo data and collections, the part that takes so long to rebuild. Keep it somewhere safe. After reinstalling Iris, restore it here and check your folders: Iris matches the photos again and only processes the new ones. Thumbnails are not in the file; they quietly rebuild while the folder is checked.'),
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Backup.export() }, 'Export backup'), h('button', { class: 'btn sm', onclick: () => $('#fBackup').click() }, 'Restore backup'))));
   b.append(h('div', { class: 'card' }, h('h3', {}, 'Library'),
     h('div', { class: 'kv' }, h('span', {}, 'Photos understood'), h('span', {}, fmtN(L.count))),
     h('div', { class: 'kv' }, h('span', {}, 'In the bin'), h('span', {}, fmtN(L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length))),
@@ -1346,6 +1429,7 @@ function pickDir() {
 }
 $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) => IMG_RE.test(f.name)); e.target.value = ''; if (fs.length) { Indexer.addFiles(fs, 'dir'); toast(`Adding ${fmtN(fs.length)} photos`); } else toast('No photos found in that folder.'); };
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
+$('#fBackup').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await Backup.restore(f); };
 
 /* ---------------- Onboarding ---------------- */
 $('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
@@ -1366,6 +1450,7 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
   for (const [id, f] of await DB.all('folders')) { if (f.handle?.__native) Object.setPrototypeOf(f.handle, NDir.prototype); L.folders.set(id, f); }
   if (NATIVE && !Nat.has()) Nat.ask();
   for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
+  Backup.on = !!(await DB.get('kv', 'adoptPool'));
   UI.pendingScan = !!(await DB.get('kv', 'pendingScan'));
   { const smp = L.ids.filter((id) => id.startsWith('sample:')); if (smp.length) { await DB.removeItems(smp); smp.forEach((id) => L.meta.delete(id)); L.rebuild(); Log.add('info', 'removed sample photos', smp.length); } } // samples are gone for good
   renderSearchChips(); renderSearch(); renderPickSrc(); UI.binCount(); UI.renderIndex();
