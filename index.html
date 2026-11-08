@@ -90,7 +90,7 @@ button,.tile,.chip{touch-action:manipulation}
 .tile.up::before,.tile.down::before{position:absolute;right:6px;top:6px;z-index:2;font-size:16px}
 .tile.up::before{content:"👍"} .tile.down::before{content:"👎"}
 .tile .rm{position:absolute;inset:0;background:rgba(255,40,70,.18);display:none}
-.tile.mark .rm{display:block} .tile.mark img{filter:grayscale(.8) brightness(.55)}
+.tile.mark .rm{display:block} /* marked photos stay in full colour: the ✕ alone says 'this one goes' (Oscar's rule — dimming them only confused) */
 .tile.mark::after{content:"✕";position:absolute;right:8px;top:4px;font-weight:900;color:#ff8a9a;font-size:18px}
 .more{height:40px}
 .empty{padding:50px 20px;text-align:center;color:var(--mute)}
@@ -123,7 +123,6 @@ button,.tile,.chip{touch-action:manipulation}
 .cmpStrip button{flex:none;width:54px;height:54px;border-radius:9px;overflow:hidden;padding:0;border:2px solid transparent;background:var(--card);position:relative}
 .cmpStrip button.on{border-color:var(--a1)}
 .cmpStrip button img{width:100%;height:100%;object-fit:cover;display:block}
-.cmpStrip button.mark img{filter:grayscale(.8) brightness(.55)}
 .cmpStrip button.mark::after{content:"✕";position:absolute;right:3px;top:0;font-weight:900;color:#ff8a9a;font-size:14px}
 .cmpStrip button .bst{position:absolute;left:3px;bottom:1px;font-size:11px;color:#ffcf5a;text-shadow:0 1px 3px #000}
 .cmpRoute{font-weight:700;margin-top:10px}
@@ -397,7 +396,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.37';
+const VER = 'Iris 2.38';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1485,13 +1484,16 @@ const Compare = {
     g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.show(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
     const toggle = h('button', { class: 'btn pri', onclick: () => this.flip() }, '');
     this.els = { stage, info, strip, toggle, prev, next };
-    Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Same frame for every copy: switch between them and the differences jump out.'),
+    Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Same frame for every copy: switch between them and the differences jump out. Decide, and it moves on to the next.'),
       h('div', { class: 'cmpStage' }, prev, stage, next), info,
       h('div', { class: 'bar' }, toggle, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Done')), strip), true);
     this.show();
   },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.g.ids.length) return; this.i = n; this.show(); },
-  flip() { const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); this.show(); },
+  /* Decide and move on (Oscar's flow: 'elimino a la siguiente, elimino a la siguiente'): after a
+     verdict the view steps to the next copy by itself, so a whole group is decided in one pass
+     without leaving, tapping and reopening. On the last copy it stays — Done is right there. */
+  flip() { const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); if (this.i < this.g.ids.length - 1) this.i++; this.show(); },
   async show() {
     const id = this.g.ids[this.i]; const m = L.meta.get(id); if (!m) return; const { stage, info, strip, toggle, prev, next } = this.els;
     stage.src = await Thumbs.url(id);
