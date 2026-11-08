@@ -384,7 +384,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.33';
+const VER = 'Iris 2.34';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -463,6 +463,9 @@ const Work = {
   update(done, total) { if (!this.bg) return; try { window.IrisNative.workUpdate(String(done), String(total)); } catch {} },
   stop() { if (!this.bg) return; this.bg = false; try { window.IrisNative.workStop(); } catch {} },
 };
+/* Set when the battery card's button opens Android's switch, so coming back re-renders the card
+   (with its new state) — and only then, keeping the reader's place in the Library. */
+const Batt = { asking: false };
 const Backup = {
   on: false, pool: null, left: 0,
   async export() {
@@ -1561,7 +1564,7 @@ async function renderLib() {
     b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Working in the background'),
       h('p', { class: 'small' }, 'While Iris understands your photos it shows a small notification with the progress and stays awake, so a long folder check can finish with the screen off or another app open. Android’s battery saver can still stop that — unless you allow Iris to keep working. The switch is Android’s own, and it remembers it for good.'),
       h('div', { class: 'kv' }, h('span', {}, 'Battery'), h('span', {}, exempt ? 'Iris may keep working' : 'Android may stop Iris')),
-      exempt ? '' : h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => { try { window.IrisNative.battAsk(); } catch {} } }, 'Allow Iris to keep working'))));
+      exempt ? '' : h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => { Batt.asking = true; let ok; try { ok = window.IrisNative.battAsk(); } catch {} if (ok === 'false') { Batt.asking = false; toast('Android didn’t open its battery switch. Set it by hand: Settings → Apps → Iris → Battery → Unrestricted.', 8000); } } }, 'Allow Iris to keep working'))));
   }
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Backup'),
     h('p', { class: 'small' }, 'One file with everything Iris has learned — the AI vectors, photo data and collections, the part that takes so long to rebuild. Keep it somewhere safe. After reinstalling Iris, restore it here and check your folders: Iris matches the photos again and only processes the new ones. Thumbnails are not in the file; they quietly rebuild while the folder is checked.'),
@@ -1637,7 +1640,7 @@ function pickDir() {
 $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) => IMG_RE.test(f.name)); e.target.value = ''; if (fs.length) { Indexer.addFiles(fs, 'dir'); toast(`Adding ${fmtN(fs.length)} photos`); } else toast('No photos found in that folder.'); };
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 $('#fBackup').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await Backup.restore(f); };
-if (NATIVE) addEventListener('irisnative-resume', () => { if (cur === 'lib') renderLib(); }); // e.g. back from Android's battery switch: show its new state
+if (NATIVE) addEventListener('irisnative-resume', async () => { if (cur === 'lib' && Batt.asking) { Batt.asking = false; const st = $('#main').scrollTop; await renderLib(); $('#main').scrollTop = st; } }); // back from Android's battery switch: show its new state, without losing your place
 
 /* ---------------- Onboarding ---------------- */
 $('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };

@@ -188,9 +188,24 @@ class MainActivity : Activity() {
            Android's battery optimization can still stop background work unless Iris is exempt, and only
            the user can grant that — battAsk opens the system's own dialog for this app. */
         @JavascriptInterface fun battExempt(): String { val pm = getSystemService(PowerManager::class.java); return (pm?.isIgnoringBatteryOptimizations(packageName) ?: false).toString() }
-        @JavascriptInterface fun battAsk() = runOnUiThread {
-            try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) }
-            catch (e: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {} }
+        /* The direct dialog only opens when the app holds REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (declared in
+           the manifest since this build; without it the intent silently goes nowhere — Oscar's tap did
+           nothing). Three doors, and the page is told honestly whether any of them opened: the system
+           dialog, the battery-optimization list, and this app's own details page (where Samsung puts
+           Battery → Unrestricted). */
+        @JavascriptInterface fun battAsk(): String {
+            // Bridge calls run on a binder thread: post the intents to the UI thread and wait briefly for the verdict.
+            val latch = java.util.concurrent.CountDownLatch(1); var opened = false
+            runOnUiThread {
+                try {
+                    opened = try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))); true }
+                    catch (e: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)); true }
+                    catch (e2: Exception) { try { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))); true }
+                    catch (e3: Exception) { false } } }
+                } finally { latch.countDown() }
+            }
+            try { latch.await(3, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
+            return opened.toString()
         }
         @JavascriptInterface fun workStart(label: String): String {
             return try {
