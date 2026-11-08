@@ -114,6 +114,7 @@ button,.tile,.chip{touch-action:manipulation}
 .group .gh .btn{flex:none;white-space:nowrap}
 .tile .loc{position:absolute;left:0;right:0;bottom:0;padding:16px 7px 5px;font-size:10.5px;font-weight:600;line-height:1.2;color:rgba(255,255,255,.92);background:linear-gradient(transparent,rgba(0,0,0,.78));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;letter-spacing:.1px}
 .tile .loc.prot{color:#ffd27a;background:linear-gradient(transparent,rgba(70,30,0,.88))}
+.tile .loc.tiny{font-size:9px;padding:11px 5px 3px;font-weight:600}
 .seg{display:inline-flex;padding:4px;border-radius:14px;background:var(--card);border:1px solid var(--line);gap:2px;margin-bottom:12px}
 .seg button{padding:8px 16px;border-radius:11px;color:var(--mute);font-weight:600;font-size:14px}
 .seg button.on{background:var(--card2);color:var(--text)}
@@ -384,7 +385,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.34';
+const VER = 'Iris 2.35';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -766,6 +767,15 @@ const Sel = { on: false, set: new Set(), grid: null };
 const ROOTISH = /^(phone storage|internal storage|storage|0|emulated)$/i;
 function locParts(id) { const m = L.meta.get(id); if (!m) return []; const f = L.folders.get(m.folder)?.name || ''; const p = (m.path || []).filter(Boolean); return (f && !(ROOTISH.test(f) && p.length) ? [f] : []).concat(p); }
 function locLabel(id) { const p = locParts(id); return p.length > 2 ? '… › ' + p.slice(-2).join(' › ') : p.join(' › ') || 'Picked photo'; }
+/* Tiny folder ribbons (collections only): every thumbnail whispers the name of the folder it lives in —
+   nothing more. Oscar's two rules: no folder icon (its colour would pollute the photo) and no file name
+   or full path either (a long snake of text on every photo); just where it is, one short name. Off by
+   default; the Path chip in a collection's bar turns them on and off in place (no re-render, your scroll
+   stays), and the choice is remembered. Search, Best of and the home grid never grow them: openColl is
+   the only caller. */
+const Paths = { get on() { try { return localStorage.getItem('iris.paths') === '1'; } catch { return false; } }, set(on) { try { localStorage.setItem('iris.paths', on ? '1' : '0'); } catch {} } };
+function pathLabel(id) { const p = locParts(id); return p.length ? p[p.length - 1] : 'Picked photo'; }
+function applyPaths() { $$('#modal .tile').forEach((t) => { const old = t.querySelector('.loc.tiny'); if (Paths.on && !old) t.append(h('span', { class: 'loc tiny' }, pathLabel(t.dataset.id))); else if (!Paths.on && old) old.remove(); }); }
 const isProt = (id) => protectedN([id]) > 0;
 function grid(ids, opts = {}) {
   const wrap = h('div', { class: 'grid' + (Sel.on ? ' selmode' : '') }); const PAGE = 150; let shown = 0;
@@ -781,6 +791,7 @@ function tile(id, i, list, opts) {
   const b = opts.badge?.(id, i); if (b) t.append(h('span', { class: 'badge' + (b.cls ? ' ' + b.cls : '') }, b.text));
   if (opts.num) t.append(h('span', { class: 'num' }, String(i + 1)));
   if (opts.loc) { const pr = isProt(id); t.append(h('span', { class: 'loc' + (pr ? ' prot' : ''), title: locParts(id).join('/') }, (pr ? '🔒 ' : '📁 ') + locLabel(id))); }
+  if (opts.path && Paths.on) t.append(h('span', { class: 'loc tiny' }, pathLabel(id)));
   let lp, moved = false, longFired = false;
   t.addEventListener('pointerdown', (e) => { if (!opts.onTap && !Sel.on) Viewer.warm(id); moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); });
   t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); } });
@@ -1305,8 +1316,8 @@ async function openColl(c) {
   const ids = await collMembers(c);
   const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { c.z = +e.target.value; await DB.put('colls', c.id, c); openColl(c); } })) : '';
   Modal.open(h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
-    h('div', { class: 'bar' }, h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); } }, 'Delete collection')),
-    grid(ids)), true);
+    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); } }, 'Delete collection')),
+    grid(ids, { path: true })), true);
 }
 $('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); };
 
