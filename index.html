@@ -384,7 +384,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.31';
+const VER = 'Iris 2.32';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1045,12 +1045,15 @@ function renderSearch() {
     const ids = L.live().sort((a, b) => L.meta.get(b).mtime - L.meta.get(a).mtime); res.append(grid(ids)); return;
   }
   const fb = S.pos.size + S.neg.size;
-  bar.append(h('span', {}, `${S.results.length} matches` + (fb ? ` · tuned by ${S.pos.size}👍 ${S.neg.size}👎` : '')), h('span', { class: 'sp' }),
+  bar.append(h('span', {}, `${S.results.length} matches` + (fb ? ` · tuned by ${S.pos.size}👍 ${S.neg.size}👎` : '')));
+  // All the action chips share one wrapping row (2.32): Teach it sits on the same line as
+  // Save as collection / Best of these instead of alone at the top next to the count.
+  bar.append(h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;flex-basis:100%' },
     h('button', { class: 'chip' + (S.refine ? ' on' : ''), onclick: () => { S.refine = !S.refine; if (S.refine) toast('Tap photos: once 👍 more like this, twice 👎 less like this.', 3500); renderSearch(); } }, S.refine ? '✓ Teaching' : '👍👎 Teach it'),
     fb ? h('button', { class: 'chip', onclick: () => { S.pos.clear(); S.neg.clear(); runSearch(); } }, 'Reset tuning') : '',
     h('button', { class: 'chip', onclick: () => saveCollDialog() }, '★ Save as collection'),
     h('button', { class: 'chip', onclick: () => { Pick.preset(S.results.map((r) => r.id)); } }, '✦ Best of these'),
-    h('button', { class: 'chip', onclick: () => { startSel(); S.results.forEach((r) => Sel.set.add(r.id)); renderSearch(); updSel(); } }, 'Select all'));
+    h('button', { class: 'chip', onclick: () => { startSel(); S.results.forEach((r) => Sel.set.add(r.id)); renderSearch(); updSel(); } }, 'Select all')));
   const ids = S.results.map((r) => r.id);
   let refT;
   res.append(grid(ids, {
@@ -1372,7 +1375,7 @@ document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contai
 window.IrisBack = () => { try { return Back.handler(); } catch (e) { return false; } };
 const Back = {
   push() { history.pushState({ iris: 1 }, ''); },
-  handler() { if ($('#viewer').classList.contains('on')) { Viewer.close(true); return true; } if (Sel.on) { endSel(); return true; } if ($('#modal').classList.contains('on')) { Modal.close(true); return true; } if (cur !== 'search') { go('search'); return true; } return false; },
+  handler() { if ($('#viewer').classList.contains('on')) { Viewer.close(true); return true; } if (Sel.on) { endSel(); return true; } if ($('#modal').classList.contains('on')) { Modal.close(true); return true; } const prev = NavStack.pop(); if (prev) { show(prev); return true; } if (cur !== 'search') { show('search'); return true; } return false; },
 };
 history.replaceState({ iris: 0 }, ''); history.pushState({ iris: 1 }, '');
 addEventListener('popstate', () => { if (Back.handler()) history.pushState({ iris: 1 }, ''); });
@@ -1539,8 +1542,15 @@ async function ensureAI() {
 }
 
 let cur = 'search';
-function go(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v)); $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); $('#main').scrollTop = 0;
+/* Step-by-step Back (2.32, the way Faro does it): every move to another view remembers
+   the view it came from, and Back unwinds those steps one at a time — the viewer, the
+   selection and any sheet still close first, before the view steps. So a suggested
+   collection opened into Search goes Back to Collections, and only at the root —
+   Search with nothing left to unwind — does Back leave the app. Capped at 30 steps. */
+const NavStack = [];
+function show(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v)); $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); $('#main').scrollTop = 0;
   if (v === 'search') { if (!S.q) renderSearch(); } if (v === 'clean') renderClean(); if (v === 'coll') renderColl(); if (v === 'pick') renderPickSrc(); if (v === 'lib') renderLib(); if (v === 'bin') renderBin(); }
+function go(v) { if (v !== cur) { NavStack.push(cur); if (NavStack.length > 30) NavStack.shift(); } show(v); }
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
 $('#binBtn').onclick = () => { if (Sel.on) endSel(); go('bin'); };
 $('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
