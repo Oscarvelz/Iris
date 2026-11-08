@@ -24,9 +24,9 @@ async function big(file) {
   const c = new OffscreenCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s)); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
   return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
 }
-async function prep(file) {
+async function prep(file, ow = 0, oh = 0) {
   const bmp = await bitmap(file);
-  const W = bmp.width, H = bmp.height; const s = Math.min(1, 640 / Math.max(W, H));
+  const W = ow || bmp.width, H = oh || bmp.height; const s = Math.min(1, 640 / Math.max(W, H));
   const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
   const c = new OffscreenCanvas(mw, mh); c.getContext('2d').drawImage(bmp, 0, 0, mw, mh); bmp.close();
   const bytes = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg', quality: 0.88 })).arrayBuffer());
@@ -49,6 +49,6 @@ async function prep(file) {
 }
 onmessage = async ({ data }) => {
   if (data.op === 'big') { try { postMessage({ id: data.id, p: await big(data.file), heavy: isHeif(data.file) ? 1 : 0 }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); } return; }
-  try { const p = await prep(data.file); postMessage({ id: data.id, p, heavy: isHeif(data.file) ? 1 : 0 }, p ? [p.bytes.buffer] : []); }
+  try { const p = await prep(data.file, data.ow, data.oh); postMessage({ id: data.id, p, heavy: isHeif(data.file) ? 1 : 0 }, p ? [p.bytes.buffer] : []); }
   catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e), heavy: isHeif(data.file) ? 1 : 0 }); }
 };

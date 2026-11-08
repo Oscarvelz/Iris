@@ -384,7 +384,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.32';
+const VER = 'Iris 2.33';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -426,6 +426,43 @@ const DB = {
    is unknown (a fresh install gives folders new ids, and copied files get
    new dates), it adopts the backup record with the same path/name+size, so
    only genuinely new photos go through the AI. */
+/* Save-with-destination inside the Android shell (2.33): the WebView offers no save dialog,
+   no Web Share and no working download, so Backup.export silently saved nothing there. The
+   shell's bridge streams the file to a cache temp in base64 chunks and then opens Android's
+   own document picker — the user chooses the folder and the name — and calls back through
+   window.__irisSaved. Shells older than this web version simply don't have saveStart, so
+   this returns 'unavailable' and the export falls through to the browser paths below. */
+const NativeSave = {
+  pending: null,
+  async save(file) {
+    const B = window.IrisNative; if (!B?.saveStart) return 'unavailable';
+    const CH = 192 * 1024;
+    try {
+      if (!JSON.parse(B.saveStart(file.name))) return 'unavailable';
+      const u = new Uint8Array(await file.arrayBuffer());
+      for (let o = 0; o < u.length; o += CH) {
+        const slice = u.subarray(o, Math.min(u.length, o + CH)); let bin = '';
+        for (let i = 0; i < slice.length; i += 32768) bin += String.fromCharCode.apply(null, slice.subarray(i, i + 32768));
+        if (!JSON.parse(B.saveChunk(btoa(bin)))) { try { B.saveAbort(); } catch {} return 'unavailable'; }
+      }
+    } catch (e) { try { B.saveAbort(); } catch {} return 'unavailable'; }
+    const done = new Promise((res) => { NativeSave.pending = res; });
+    try { B.saveFinish(); } catch (e) { NativeSave.pending = null; return 'unavailable'; }
+    const r = await done; NativeSave.pending = null; return r === 'saved' ? 'saved' : 'cancel';
+  },
+};
+window.__irisSaved = (r) => { if (NativeSave.pending) NativeSave.pending(r); };
+/* Background work (2.33, at Oscar's ask): while the indexer understands photos, the shell's work
+   service keeps Iris alive — a progress notification and a wake lock — so a long folder check can
+   finish with the screen off or another app in front. bg=true is also what lets the indexer loop
+   keep going while the page is hidden; without the service, hidden means pause, as before.
+   In a browser none of this exists and Work stays quietly off. */
+const Work = {
+  bg: false,
+  start(label) { if (!NATIVE || !window.IrisNative?.workStart) return; try { if (JSON.parse(window.IrisNative.workStart(label))) this.bg = true; } catch {} },
+  update(done, total) { if (!this.bg) return; try { window.IrisNative.workUpdate(String(done), String(total)); } catch {} },
+  stop() { if (!this.bg) return; this.bg = false; try { window.IrisNative.workStop(); } catch {} },
+};
 const Backup = {
   on: false, pool: null, left: 0,
   async export() {
@@ -437,8 +474,15 @@ const Backup = {
     const pre = new Uint8Array(12); pre.set(new TextEncoder().encode('IRISBAK1')); new DataView(pre.buffer).setUint32(8, head.length, true);
     const name = `iris-backup-${new Date().toISOString().slice(0, 10)}.irisbak`;
     const file = new File([pre, head, ...parts], name, { type: 'application/octet-stream' });
-    // The destination is the user's to choose (2.30): the system save dialog first, where the browser offers it;
-    // share next, and the plain download last — and every path says where the file went.
+    // The destination is the user's to choose. Inside the Android shell the ONLY path that truly
+    // works is the shell's own document picker (2.33) — the WebView has none of the browser paths.
+    if (NATIVE) {
+      const r = await NativeSave.save(file);
+      if (r === 'saved') { toast(`Backup saved as ${name}, in the place you chose — keep it somewhere safe.`, 5000); return; }
+      if (r === 'cancel') return;
+    }
+    // In a browser: the system save dialog first, where offered; share next, and the plain
+    // download last — and every path says where the file went.
     if (window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'Iris backup', accept: { 'application/octet-stream': ['.irisbak'] } }] });
@@ -637,6 +681,23 @@ const NATIVE = !!window.IrisNative; // running inside the Iris for Android shell
 // In Samsung pop-up view the WebView reports the gap to the screen bottom as an inset, which pushed the nav up.
 if (NATIVE) document.documentElement.style.setProperty('--safe-b', '0px');
 const IS_EDGE = /\bEdgA?\//.test(navigator.userAgent) || NATIVE; // both: hide the webkitdirectory trick
+/* In the shell, Android decodes photos far faster than JavaScript and handles HEIC natively:
+   when a file came from a native folder, ask the shell for a copy already sized for the prep
+   pipeline (and the photo's true dimensions in the reply headers) instead of hauling the whole
+   original into a JS decoder. Any failure quietly falls back to the original file. */
+const NatSized = {
+  async swap(file, w, dims = true) {
+    if (!NATIVE || !file?.__np) return null;
+    try {
+      const r = await fetch(NAT_URL.replace('/f?', '/v?') + encodeURIComponent(file.__np) + '&w=' + w);
+      if (!r.ok) return null;
+      const b = await r.blob(); if (!b.size) return null;
+      const ow = parseInt(r.headers.get('X-Iris-OW')) || 0, oh = parseInt(r.headers.get('X-Iris-OH')) || 0;
+      if (dims && (!ow || !oh)) return null; // a shell older than 2.33 sends no dimensions: stay on the original file rather than store the small copy's size
+      return { file: new File([b], file.name, { type: 'image/jpeg', lastModified: file.lastModified }), ow, oh };
+    } catch { return null; }
+  },
+};
 const Prep = {
   // Worker pool. HEIC decoding (libheif WASM) grows each worker's memory and it never shrinks, so a worker is
   // recycled after a few HEIC photos, and a crashed worker is replaced instead of giving up on workers for good.
@@ -659,17 +720,19 @@ const Prep = {
     const k = this.rr++ % this.pool.length, w = this.pool[k]; const id = ++this.seq;
     return new Promise((res) => { const t = setTimeout(() => this.crash(k, w, 'timed out'), ms); w.jobs.set(id, { res, t }); w.postMessage({ ...msg, id }); });
   },
-  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; return (await this.send({ op: 'big', file })) || null; },
+  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const sw = await NatSized.swap(file, 2048, false); return (await this.send({ op: 'big', file: sw?.file || file })) || null; },
   async run(file) {
-    this.init(); this.lastErr = ''; if (!this.ok || !this.pool.length) return prep(file);
-    let r = await this.send({ file }); if (r !== undefined) return r;
-    r = await this.send({ file }); if (r !== undefined) return r; // one retry in a fresh worker
-    this.lastErr = 'decoder crashed twice on this photo'; return /\.(heic|heif)$/i.test(file.name || '') ? null : prep(file);
+    this.init(); this.lastErr = '';
+    const sw = await NatSized.swap(file, 640); const f2 = sw?.file || file, ow = sw?.ow || 0, oh = sw?.oh || 0;
+    if (!this.ok || !this.pool.length) return prep(f2, ow, oh);
+    let r = await this.send({ file: f2, ow, oh }); if (r !== undefined) return r;
+    r = await this.send({ file: f2, ow, oh }); if (r !== undefined) return r; // one retry in a fresh worker
+    this.lastErr = 'decoder crashed twice on this photo'; return /\.(heic|heif)$/i.test(file.name || '') ? null : prep(f2, ow, oh);
   },
 };
-async function prep(file) {
+async function prep(file, ow = 0, oh = 0) {
   let bmp; try { bmp = await createImageBitmap(file); } catch { return null; }
-  const W = bmp.width, H = bmp.height; const s = Math.min(1, 640 / Math.max(W, H)); const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
+  const W = ow || bmp.width, H = oh || bmp.height; const s = Math.min(1, 640 / Math.max(W, H)); const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
   const c = new OffscreenCanvas(mw, mh); const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, mw, mh); bmp.close();
   const bytes = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg', quality: .88 })).arrayBuffer());
   const ts = Math.min(1, 360 / Math.max(mw, mh)); const tc = new OffscreenCanvas(Math.round(mw * ts), Math.round(mh * ts)); tc.getContext('2d').drawImage(c, 0, 0, tc.width, tc.height);
@@ -781,7 +844,7 @@ const Nat = {
 };
 class NFile { constructor(path, name, s, m) { this.__native = path; this.name = name; this.kind = 'file'; this.s = s; this.m = m; }
   async getFile() { const r = await fetch(NAT_URL + encodeURIComponent(this.__native)); if (!r.ok) throw new DOMException('Could not read ' + this.name, 'NotReadableError');
-    const b = await r.blob(); return new File([b], this.name, { type: b.type, lastModified: this.m || Date.now() }); } }
+    const b = await r.blob(); const f = new File([b], this.name, { type: b.type, lastModified: this.m || Date.now() }); f.__np = this.__native; return f; } }
 class NDir { constructor(path, name) { this.__native = path; this.name = name ?? path.split('/').pop(); this.kind = 'directory'; }
   async *entries() { for (const e of Nat.call('list', this.__native)) { const p = this.__native + '/' + e.n; yield [e.n, e.d ? new NDir(p, e.n) : new NFile(p, e.n, e.s, e.m)]; } }
   async getDirectoryHandle(n) { const p = this.__native + '/' + n; if (!Nat.call('isDir', p)) throw new DOMException(n + ' not found', 'NotFoundError'); return new NDir(p, n); }
@@ -964,16 +1027,17 @@ const Indexer = {
     if (!(await ensureAI())) { UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
     this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now(); Log.add('info', 'index start', this.queue.length, 'queued');
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
+    Work.start('Understanding your photos');
     UI.renderIndex();
     let next = this.prepNext();
     while (this.queue.length || next || this.scanning) {
       if (this.paused) { await sleep(300); continue; }
-      if (document.hidden) { await sleep(500); continue; } // never use the GPU when you've switched to another app
+      if (document.hidden && !Work.bg) { await sleep(500); continue; } // never use the GPU when you've switched to another app — unless the shell's work service is keeping Iris alive, which is exactly what it is for
       if (performance.now() - lastTouch < 1500) { await sleep(250); continue; } // you're touching the screen: let the UI have the phone
       if (!next) { if (this.queue.length) next = this.prepNext(); else { await sleep(200); continue; } }
       const job = await next; next = this.queue.length ? this.prepNext() : null;
       if (!job) continue; this.queued.delete(job.id);
-      if (!job.p) { this.skipped++; this.done++; if (this.skipped <= 5) Log.add('warn', 'could not open/decode', job.base.name, job.err || ''); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; this.queue.unshift(job); this.done--; this.skipped--; toast('Iris can\u2019t open these photos (' + (job.err || 'unknown') + '). Paused so nothing is wasted. Library \u2192 Diagnostics \u2192 Copy report.', 9000); UI.renderIndex(); } else if (this.done % 5 === 0) UI.renderIndex(); continue; }
+      if (!job.p) { this.skipped++; this.done++; Work.update(this.done, this.total); if (this.skipped <= 5) Log.add('warn', 'could not open/decode', job.base.name, job.err || ''); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; this.queue.unshift(job); this.done--; this.skipped--; toast('Iris can\u2019t open these photos (' + (job.err || 'unknown') + '). Paused so nothing is wasted. Library \u2192 Diagnostics \u2192 Copy report.', 9000); UI.renderIndex(); } else if (this.done % 5 === 0) UI.renderIndex(); continue; }
       try {
         const tA = performance.now(); const vec = await AI.image(job.p.bytes); const rest = (performance.now() - tA) * this.REST[this.speed];
         const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, mtime: job.base.mtime || job.file?.lastModified || Date.now(), status: null, at: Date.now() };
@@ -981,10 +1045,10 @@ const Indexer = {
         if (rest > 0) await sleep(Math.min(rest, 4000)); // let the GPU breathe so the phone stays smooth
       } catch (e) { this.skipped++; if (this.skipped <= 5) console.error('AI failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('The AI is failing on every photo (' + e.message + '). Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
       this.done++;
-      if (this.done % 5 === 0 || !this.queue.length) UI.renderIndex();
+      if (this.done % 5 === 0 || !this.queue.length) { UI.renderIndex(); Work.update(this.done, this.total); }
       if (L.count <= 12 || (L.count < 60 && this.done % 12 === 0)) UI.refreshLight(); else if (this.done % 10 === 0) UI.newChip();
     }
-    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { DB.put('kv', 'pendingScan', false); UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
+    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { DB.put('kv', 'pendingScan', false); UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
     Junk.cache = null; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
     toast(`Done. ${fmtN(L.count)} photos ready to search.` + (this.skipped ? ` ${fmtN(this.skipped)} couldn’t be read.` : ''), 4500);
   },
@@ -1492,6 +1556,13 @@ async function renderLib() {
   const diag = h('pre', { style: 'white-space:pre-wrap;font-size:11px;max-height:220px;overflow:auto;background:#0004;padding:10px;border-radius:10px;margin:10px 0 0;color:var(--mute)' }, Log.lines.slice(-25).join('\n') || 'Nothing logged yet.');
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Diagnostics · ' + VER), h('p', { class: 'small' }, 'If something misbehaves, tap Copy report and paste it to Hark.'), diag,
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:10px' }, h('button', { class: 'btn sm pri', onclick: async () => { const r = await Log.report(); try { await navigator.clipboard.writeText(r); toast('Report copied. Paste it to Hark.'); } catch { if (navigator.share) navigator.share({ text: r }).catch(() => {}); else toast('Couldn’t copy.'); } } }, 'Copy report'), h('button', { class: 'btn sm', onclick: () => renderLib() }, 'Refresh'))));
+  if (NATIVE && window.IrisNative?.battExempt) {
+    let exempt = false; try { exempt = JSON.parse(window.IrisNative.battExempt()); } catch {}
+    b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Working in the background'),
+      h('p', { class: 'small' }, 'While Iris understands your photos it shows a small notification with the progress and stays awake, so a long folder check can finish with the screen off or another app open. Android’s battery saver can still stop that — unless you allow Iris to keep working. The switch is Android’s own, and it remembers it for good.'),
+      h('div', { class: 'kv' }, h('span', {}, 'Battery'), h('span', {}, exempt ? 'Iris may keep working' : 'Android may stop Iris')),
+      exempt ? '' : h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => { try { window.IrisNative.battAsk(); } catch {} } }, 'Allow Iris to keep working'))));
+  }
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Backup'),
     h('p', { class: 'small' }, 'One file with everything Iris has learned — the AI vectors, photo data and collections, the part that takes so long to rebuild. Keep it somewhere safe. After reinstalling Iris, restore it here and check your folders: Iris matches the photos again and only processes the new ones. Thumbnails are not in the file; they quietly rebuild while the folder is checked.'),
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, h('button', { class: 'btn pri sm', onclick: () => Backup.export() }, 'Export backup'), h('button', { class: 'btn sm', onclick: () => $('#fBackup').click() }, 'Restore backup'))));
@@ -1566,6 +1637,7 @@ function pickDir() {
 $('#fDir').onchange = async (e) => { const fs = [...e.target.files].filter((f) => IMG_RE.test(f.name)); e.target.value = ''; if (fs.length) { Indexer.addFiles(fs, 'dir'); toast(`Adding ${fmtN(fs.length)} photos`); } else toast('No photos found in that folder.'); };
 $('#fPhotos').onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) { Indexer.addFiles(fs); toast(`Adding ${fs.length} photos`); } };
 $('#fBackup').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await Backup.restore(f); };
+if (NATIVE) addEventListener('irisnative-resume', () => { if (cur === 'lib') renderLib(); }); // e.g. back from Android's battery switch: show its new state
 
 /* ---------------- Onboarding ---------------- */
 $('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
