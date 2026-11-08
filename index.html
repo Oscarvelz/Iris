@@ -384,7 +384,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.30';
+const VER = 'Iris 2.31';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1133,8 +1133,61 @@ async function addToColl(ids) {
   Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { c.ids = [...new Set([...c.ids, ...ids])]; await DB.put('colls', c.id, c); Modal.close(); toast(`Added ${ids.length} to ${c.name}`); } }, '★ ' + c.name)),
     h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(); saveCollDialog(ids); } }, '+ New collection')));
 }
-const SUGG_DECOY = ['a portrait photo of a person', 'a product photo of an object on a white background', 'a document, card or text on paper', 'a screenshot of a phone screen', 'a wristwatch or jewelry'];
-const SUGGEST = [['🌅', 'Sunsets', 'a beautiful sunset or sunrise sky'], ['🍽️', 'Food', 'a plate of delicious food'], ['🐶', 'Pets', 'a dog or a cat'], ['🏖️', 'Beach', 'the beach and the ocean'], ['🌃', 'Night city', 'city lights at night'], ['🤳', 'Selfies', 'a selfie of a person'], ['⛰️', 'Nature', 'mountains, forests and nature'], ['🎉', 'Celebrations', 'a party or celebration with friends'], ['📚', 'Books & art', 'books, art and museums'], ['🚗', 'Cars', 'a car']];
+const SUGG_DECOY = ['a portrait photo of a person', 'a product photo of an object on a white background', 'a document, card or text on paper', 'a screenshot of a phone screen', 'a wristwatch or jewelry', 'an empty room with no people in it', 'a close-up of a hand', 'a plain wall or floor with nothing on it'];
+/* Suggested categories (2.31): a wide catalog, not a fixed top-10. Every photo Iris has
+   understood is scored against EVERY category (each category keeps the best of its
+   prompts), a photo counts only for the single category it matches best — ahead of all
+   the others and of the decoys above, and clearly above that category's background —
+   and the cards are then RANKED BY THE REAL COUNT, biggest first, with the share of
+   the whole library shown. A category needs at least 3 photos to be recommended.
+   Two ways to clear the bar: the classic z ≥ 2.2 over the whole library, OR the
+   big-category rescue — a plain z punishes exactly the biggest categories (when a
+   third of the library is beach, the beach average rises and no beach photo reaches
+   z 2.2), so a photo also counts when it stands 4 background-sigmas out (background =
+   the lowest 70% of that category's scores) and beats the runner-up by a real margin.
+   The first count computes every prompt once; the text vectors are cached in kv
+   (q2:), so later visits are instant until the library changes. */
+const SUGGEST = [
+  ['👨‍👩‍👧', 'Family', ['a family photo with parents and children together', 'a family gathering at home']],
+  ['👥', 'Group photos', ['a group photo of friends posing together']],
+  ['🧑', 'Portraits', ['a portrait photo of a person looking at the camera']],
+  ['🤳', 'Selfies', ['a selfie of a person']],
+  ['👶', 'Kids & babies', ['a baby or young child playing', 'children playing together']],
+  ['🎉', 'Celebrations', ['a party or celebration with friends']],
+  ['🎂', 'Birthdays', ['a birthday party with a cake and candles']],
+  ['💒', 'Weddings', ['a wedding ceremony with a bride and groom']],
+  ['🎓', 'Graduations', ['a graduation ceremony with a cap and gown']],
+  ['⛪', 'Church & faith', ['inside a church during a religious service', 'a religious ceremony, a baptism or a first communion']],
+  ['🏖️', 'Beach', ['the beach and the ocean']],
+  ['🏊', 'Pool & swimming', ['people swimming in a pool']],
+  ['⛰️', 'Nature & mountains', ['mountains, forests and nature']],
+  ['🌴', 'Tropical & palms', ['palm trees in a tropical place']],
+  ['🌸', 'Flowers & garden', ['flowers and a garden full of plants', 'a well kept garden or green lawn']],
+  ['🌅', 'Sunsets & sunrises', ['a beautiful sunset or sunrise sky']],
+  ['☁️', 'Sky & clouds', ['the sky with clouds']],
+  ['🌊', 'Lakes, rivers & sea', ['a lake, river or waterfall in nature']],
+  ['🐶', 'Pets', ['a dog or a cat', 'a dog playing outdoors']],
+  ['🦜', 'Animals & wildlife', ['a wild animal or a bird in nature']],
+  ['🍽️', 'Food', ['a plate of delicious food']],
+  ['🍰', 'Desserts & cakes', ['a cake or a sweet dessert']],
+  ['☕', 'Coffee & drinks', ['a cup of coffee or a drink on a table']],
+  ['🏠', 'At home', ['inside a home, a living room or a kitchen']],
+  ['🧺', 'Clutter', ['a cluttered, messy room with piles of things everywhere', 'a messy desk or table covered with clutter', 'piles of clothes and objects scattered around']],
+  ['🌃', 'Night city', ['city lights at night']],
+  ['🏙️', 'City & streets', ['a city street with buildings during the day']],
+  ['🏛️', 'Buildings & landmarks', ['a famous building or architectural landmark']],
+  ['🚗', 'Cars', ['a car', 'cars on a street or in a parking lot']],
+  ['✈️', 'Travel & airports', ['an airplane or an airport while traveling']],
+  ['🛣️', 'Road trips', ['a road or highway seen from a car while traveling']],
+  ['🎵', 'Music & concerts', ['a concert or people playing music live']],
+  ['⚽', 'Sports', ['people playing a sport or exercising']],
+  ['🛍️', 'Shopping & stores', ['inside a store or shopping mall with products on shelves']],
+  ['💼', 'Work & office', ['an office or workplace with a desk and a computer']],
+  ['📚', 'Books & art', ['books, art and museums']],
+  ['🎄', 'Holidays', ['christmas decorations and a christmas tree', 'a holiday celebration dinner with family']],
+  ['📱', 'Screenshots', ['a screenshot of a phone screen']],
+  ['🧾', 'Receipts & documents', ['a photo of a receipt, a document or a paper form']],
+];
 const Sugg = { cache: null };
 async function renderColl() {
   const tok = ++RT_.coll; const body = $('#collBody'); body.innerHTML = '';
@@ -1144,18 +1197,38 @@ async function renderColl() {
   if (mine.length) { body.append(h('h2', {}, 'Yours')); const cards = h('div', { class: 'cards' }); body.append(cards);
     for (const c of mine) { const ids = await collMembers(c); const cover = h('div', { class: 'cover' }); if (ids[0]) Thumbs.url(ids[0]).then((u) => cover.style.backgroundImage = `url(${u})`);
       cards.append(h('div', { class: 'card click', onclick: () => openColl(c) }, cover, h('h3', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', {}, `${fmtN(ids.length)} photos · ${c.type === 'smart' ? 'smart, updates itself' : 'hand-picked'}`))); } }
-  body.append(h('h2', {}, 'Suggested for you'), h('p', { class: 'sub' }, 'Found automatically. Tap one to explore, then save it if you like it.'));
+  body.append(h('h2', {}, 'Suggested for you'), h('p', { class: 'sub' }, `Counted from your own ${fmtN(L.live().length)} photos across ${SUGGEST.length} categories, biggest first — these are the folders your library actually fills. Tap one to explore, then save it if you like it.`));
   const cards = h('div', { class: 'cards' }); body.append(cards);
-  if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + SUGGEST[SUGGEST.length - 1][2]))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
-  const sKey = L.count + ':' + L.live().length; if (!Sugg.cache || Sugg.cache.n !== sKey) { const ids = L.live(); const cats = []; for (const [ic, name, q] of SUGGEST) { try { cats.push({ ic, name, q, sc: scoreAll(Float32Array.from(await AI.text(q)), ids) }); } catch {} await sleep(0); }
-      const decoys = []; for (const q of SUGG_DECOY) { try { decoys.push(scoreAll(Float32Array.from(await AI.text(q)), ids)); } catch {} await sleep(0); }
-      const list = cats.map((c) => { const st = stats(c.sc); const out = []; for (let i = 0; i < ids.length; i++) { const v = c.sc[i]; if ((v - st.mean) / st.sd < 2.2) continue; if (cats.some((o) => o !== c && o.sc[i] > v) || decoys.some((d) => d[i] > v)) continue; out.push({ id: ids[i], s: v }); } out.sort((a, b) => b.s - a.s); return { ic: c.ic, name: c.name, q: c.q, ids: out.map((r) => r.id) }; });
-      Sugg.cache = { n: sKey, list }; }
+  const lastQ = SUGGEST[SUGGEST.length - 1][2]; const lastPrompt = lastQ[lastQ.length - 1];
+  if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + lastPrompt))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
+  const sKey = L.count + ':' + L.live().length;
+  if (!Sugg.cache || Sugg.cache.n !== sKey) {
+    const ids = L.live(); const total = ids.length;
+    const counting = h('div', { class: 'card' }, h('p', {}, 'Counting your photos in every category…')); cards.append(counting);
+    const cats = [];
+    for (const [ic, name, qs] of SUGGEST) {
+      try {
+        let sc = null;
+        for (const q of qs) { const s = scoreAll(Float32Array.from(await AI.text(q)), ids); if (!sc) sc = s; else for (let i = 0; i < s.length; i++) if (s[i] > sc[i]) sc[i] = s[i]; await sleep(0); }
+        if (sc) cats.push({ ic, name, q: qs[0], sc });
+      } catch {}
+      const cp = counting.querySelector('p'); if (cp) cp.textContent = `Counting your photos in every category… ${cats.length} of ${SUGGEST.length}`;
+      if (tok !== RT_.coll) return;
+    }
+    const decoys = []; for (const q of SUGG_DECOY) { try { decoys.push(scoreAll(Float32Array.from(await AI.text(q)), ids)); } catch {} await sleep(0); }
+    const list = cats.map((c) => { const st = stats(c.sc); const srt = [...c.sc].sort((a, b) => a - b); const bg = stats(srt.slice(0, Math.max(10, Math.floor(srt.length * .7)))); const out = []; for (let i = 0; i < ids.length; i++) { const v = c.sc[i]; let second = -9; for (const o of cats) if (o !== c && o.sc[i] > second) second = o.sc[i]; for (const d of decoys) if (d[i] > second) second = d[i]; if (second > v) continue; const strong = (v - st.mean) / st.sd >= 2.2; const big = v > bg.mean + 4 * bg.sd && v - second >= .01; if (!strong && !big) continue; out.push({ id: ids[i], s: v }); } out.sort((a, b) => b.s - a.s); return { ic: c.ic, name: c.name, q: c.q, ids: out.map((r) => r.id) }; })
+      .filter((c) => c.ids.length >= 3)
+      .sort((a, b) => b.ids.length - a.ids.length);
+    Sugg.cache = { n: sKey, list, total };
+    counting.remove();
+  }
   if (tok !== RT_.coll) return;
+  const totalLib = Sugg.cache.total || L.live().length;
+  if (!Sugg.cache.list.length) cards.append(h('div', { class: 'card' }, h('p', {}, 'No category has enough photos yet to recommend. As Iris understands more of your library, your biggest categories will appear here.')));
   for (const { ic, name, q, ids } of Sugg.cache.list) {
-    if (ids.length < 2) continue;
+    const pct = totalLib ? Math.round(ids.length / totalLib * 1000) / 10 : 0;
     const mini = h('div', { class: 'mini' }); ids.slice(0, 4).forEach((id) => { const im = h('img', { alt: '' }); Thumbs.url(id).then((u) => im.src = u); mini.append(im); });
-    cards.append(h('div', { class: 'card click', onclick: () => { $('#q').value = q; S.img = null; $('#qimg').classList.add('hide'); go('search'); runSearch(); } }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos`), mini));
+    cards.append(h('div', { class: 'card click', onclick: () => { $('#q').value = q; S.img = null; $('#qimg').classList.add('hide'); go('search'); runSearch(); } }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos · ${pct}% of your library`), mini));
   }
 }
 async function openColl(c) {
