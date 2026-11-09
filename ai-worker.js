@@ -3,7 +3,7 @@ const RT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-retrieval@1.2.0';
 const CACHE = 'iris-model-v2';
 const MAN = 'https://iris-model.invalid/eg2-tv440/manifest';
 const key = (i) => 'https://iris-model.invalid/eg2-tv440/part/' + i;
-let mp = null, emb = null;
+let mp = null, emb = null, diag = '';
 
 async function modelReader(blob) {
   if (blob) return blob.stream().getReader();
@@ -42,15 +42,18 @@ onmessage = async ({ data }) => {
     if (op === 'init') {
       if (!emb) {
         if (!mp) mp = await import(RT + '/retrieval_bundle.mjs');
-        // Register the WASM factory OURSELVES first (diagnosis 2026-11-08, from Oscar's own
-        // Diagnostics paste: 'AI worker failed — ModuleFactory not set' → silent page fallback).
-        // Inside MediaPipe's createFromOptions, its loader dance (importScripts → import) left
-        // self.ModuleFactory unset in his WebView, so the check after it threw. Importing the
-        // module loader directly registers globalThis.ModuleFactory (proven in a reference
-        // Chromium worker rig); if a runtime ever stops doing even that, take its default export.
-        // With the factory already registered, MediaPipe's own load becomes a formality.
-        try { const l = await import(RT + '/wasm/retrieval_wasm_module_internal.js'); if (typeof self.ModuleFactory !== 'function' && l?.default) self.ModuleFactory = l.default; } catch {}
-        const fileset = await mp.FilesetResolver.forRetrievalTasks(RT + '/wasm', true);
+        // Register the WASM factory OURSELVES first. History: as a MODULE worker (until 2.46),
+        // MediaPipe's load dance left self.ModuleFactory unset in Oscar's WebView 156 —
+        // 'ModuleFactory not set', silent page fallback — and pre-importing the module loader
+        // ourselves (2.43) did not save it there either (his Diagnostics, 2026-11-09, still
+        // '(page)'). So 2.47 goes back to the canonical pairing the PAGE path uses: this is a
+        // CLASSIC worker now, and the classic loader registers the factory via importScripts,
+        // the standard Emscripten way. diag records the factory state at each step and rides
+        // the error back to the page's Diagnostics if init still fails — no more blind catch.
+        try { importScripts(RT + '/wasm/retrieval_wasm_internal.js'); } catch (e) { diag += ' importScripts threw: ' + ((e && e.message) || e) + ';'; }
+        diag += ' factory after importScripts: ' + typeof self.ModuleFactory + ';';
+        const fileset = await mp.FilesetResolver.forRetrievalTasks(RT + '/wasm');
+        diag += ' factory after fileset: ' + typeof self.ModuleFactory + ';';
         // GPU delegate test (2026-11-06): try GPU first and prove it with a real
         // text+image embed; on ANY failure, fall back to the exact CPU setup Iris
         // has always used. To undo this test, restore the single createEmbedder
@@ -67,6 +70,6 @@ onmessage = async ({ data }) => {
     else if (op === 'image') r = out(await emb.embedImage(arg));
     postMessage({ id, ok: true, r }, r ? [r.buffer] : []);
   } catch (e) {
-    postMessage({ id, ok: false, err: (e && e.message) || String(e) });
+    postMessage({ id, ok: false, err: ((e && e.message) || String(e)) + (diag ? ' {' + diag.trim() + '}' : '') });
   }
 };
