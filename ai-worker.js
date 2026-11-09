@@ -42,6 +42,14 @@ onmessage = async ({ data }) => {
     if (op === 'init') {
       if (!emb) {
         if (!mp) mp = await import(RT + '/retrieval_bundle.mjs');
+        // Register the WASM factory OURSELVES first (diagnosis 2026-11-08, from Oscar's own
+        // Diagnostics paste: 'AI worker failed — ModuleFactory not set' → silent page fallback).
+        // Inside MediaPipe's createFromOptions, its loader dance (importScripts → import) left
+        // self.ModuleFactory unset in his WebView, so the check after it threw. Importing the
+        // module loader directly registers globalThis.ModuleFactory (proven in a reference
+        // Chromium worker rig); if a runtime ever stops doing even that, take its default export.
+        // With the factory already registered, MediaPipe's own load becomes a formality.
+        try { const l = await import(RT + '/wasm/retrieval_wasm_module_internal.js'); if (typeof self.ModuleFactory !== 'function' && l?.default) self.ModuleFactory = l.default; } catch {}
         const fileset = await mp.FilesetResolver.forRetrievalTasks(RT + '/wasm', true);
         // GPU delegate test (2026-11-06): try GPU first and prove it with a real
         // text+image embed; on ANY failure, fall back to the exact CPU setup Iris
