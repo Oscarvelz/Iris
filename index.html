@@ -401,7 +401,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.47';
+const VER = 'Iris 2.48';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1759,7 +1759,27 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
 
 /* ---------------- Boot ---------------- */
 (async function boot() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // Updates must arrive on their own (2.48). Oscar's phone sat a version behind through a whole
+    // morning of close/reopen cycles: the bare register() left update checks to navigation
+    // heuristics and the HTTP cache (Pages serves sw.js with max-age=600), and even a freshly
+    // activated worker never refreshed the page already on screen. So: update checks never use
+    // the HTTP cache, an update is requested on every start and every resume, and when a new
+    // worker actually takes control the page refreshes ONCE — the close/reopen he was doing by
+    // hand, done by the app itself. Guarded per loaded version so it can never loop.
+    const hadController = !!navigator.serviceWorker.controller;
+    let swReloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || swReloaded) return;
+      try { if (sessionStorage.getItem('iris-sw-reload') === VER) return; sessionStorage.setItem('iris-sw-reload', VER); } catch {}
+      swReloaded = true; location.reload();
+    });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+      reg.update().catch(() => {});
+      addEventListener('irisnative-resume', () => reg.update().catch(() => {}));
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+    }).catch(() => {});
+  }
   caches.delete('iris-model').catch(() => {});
   await DB.open();
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
