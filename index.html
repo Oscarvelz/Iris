@@ -306,6 +306,7 @@ body.selon #mBody{padding-bottom:170px}
           <div class="field"><label>Variety: <b id="pVv">High</b></label><input type="range" id="pV" min="0" max="100" value="70"></div>
         </div>
         <button class="btn pri" id="pGo">✦ Pick the best</button>
+        <p class="sub" style="margin-top:8px">Screenshots, receipts and other junk are left out.</p>
       </div>
       <div id="pRes"></div>
     </section>
@@ -400,7 +401,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.44';
+const VER = 'Iris 2.45';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1209,8 +1210,8 @@ const Dups = {
     const byHash = new Map(); ids.forEach((id, i) => { const d = L.meta.get(id).dh; if (!d) return; if (byHash.has(d)) u(byHash.get(d), i); else byHash.set(d, i); });
     const gm = new Map(); ids.forEach((id, i) => { const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
     let maxSharp = 1; for (const id of ids) maxSharp = Math.max(maxSharp, L.meta.get(id).sharp);
-    this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|').slice(0, 300), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id).size || 0), 0) }; })
-      .filter((g) => !this.dismissed.has(g.key)).sort((a, b) => b.ids.length - a.ids.length);
+    this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|'), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id).size || 0), 0) }; })
+      .filter((g) => !this.dismissed.has(g.key) && !this.dismissed.has(g.key.slice(0, 300))).sort((a, b) => b.ids.length - a.ids.length);
     return this.groups;
   },
   dismiss(g) { this.dismissed.add(g.key); localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-5000))); },
@@ -1351,7 +1352,7 @@ const Pick = {
     const from = $('#pFrom').value, to = $('#pTo').value;
     if (from) { const t = new Date(from + '-01').getTime(); ids = ids.filter((id) => L.meta.get(id).mtime >= t); }
     if (to) { const d = new Date(to + '-01'); d.setMonth(d.getMonth() + 1); ids = ids.filter((id) => L.meta.get(id).mtime < d.getTime()); }
-    if (Junk.cache) ids = ids.filter((id) => !Junk.cache.jset.has(id));
+    const jk = await Junk.compute().catch(() => null); if (jk) ids = ids.filter((id) => !jk.jset.has(id));
     if (!ids.length) return toast('No photos match those settings.');
     const K = +$('#pK').value, variety = +$('#pV').value / 100;
     let rel = null; const qt = $('#pQ').value.trim();
@@ -1540,19 +1541,19 @@ const Back = {
 history.replaceState({ iris: 0 }, ''); history.pushState({ iris: 1 }, '');
 addEventListener('popstate', () => { if (Back.handler()) history.pushState({ iris: 1 }, ''); });
 /* ---------------- Modal ---------------- */
-const Modal = { _cancel: null, open(content, wide, onCancel) { this._cancel = onCancel || null; const b = $('#mBody'); b.innerHTML = ''; b.style.width = wide ? 'min(1100px,100%)' : ''; b.append(content); $('#modal').classList.add('on'); if (Sel.on) updSel(); }, close(cancel) { const c = this._cancel; this._cancel = null; $('#modal').classList.remove('on'); if (Sel.on) endSel(); if (cancel && c) c(); } };
+const Modal = { _cancel: null, open(content, wide, onCancel) { this._cancel = onCancel || null; const b = $('#mBody'); b.innerHTML = ''; b.style.width = wide ? 'min(1100px,100%)' : ''; b.append(content); $('#modal').classList.add('on'); if (Sel.on) updSel(); }, close(cancel) { const c = this._cancel; this._cancel = null; $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); if (cancel && c) c(); } };
 $('#mScrim').onclick = () => Modal.close(true);
-function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { Modal.close(); res(v); };
+function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { Modal.close(v ? undefined : true); res(v); };
   Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))), false, () => res(null));
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); }); setTimeout(() => inp.focus(), 80); }); }
-function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { Modal.close(); res(v); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => res(false)); }); }
+function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { Modal.close(v ? undefined : true); res(v); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => res(false)); }); }
 
 /* ---------------- Selection bar ---------------- */
 $('#selbar').addEventListener('click', async (e) => {
   const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set];
   if (a === 'close') return endSel();
   if (a === 'range') return setRange(!Sel.range);
-  if (a === 'all') { [...$$('.view.on .grid')].flatMap((g) => g._ids || []).forEach((id) => Sel.set.add(id)); $$('.view.on .tile').forEach((t) => t.classList.toggle('sel', Sel.set.has(t.dataset.id))); return updSel(); }
+  if (a === 'all') { const top = $('#modal').classList.contains('on') ? '#modal' : '.view.on'; [...$$(top + ' .grid')].flatMap((g) => g._ids || []).forEach((id) => Sel.set.add(id)); $$(top + ' .tile').forEach((t) => t.classList.toggle('sel', Sel.set.has(t.dataset.id))); return updSel(); }
   if (!ids.length) return toast('Select some photos first.');
   if (a === 'bin') { await setStatus(ids, 'trash'); endSel(); UI.refreshLight(); toast(`Moved ${ids.length} to the bin. Open 🗑 at the top to delete them for good.`, 3500); }
   if (a === 'restore') { await setStatus(ids, null); endSel(); UI.refreshLight(); if (cur === 'bin') renderBin(); else renderClean(); toast(`Restored ${ids.length}`); }
@@ -1586,7 +1587,7 @@ async function renderClean() {
          'Remove' with the count beside it. */
       const marks = new Set(g.ids.slice(1)); const row = h('div', { class: 'row' });
       const onRemove = async () => { if (!marks.size) return; const n = marks.size; await setStatus([...marks], 'trash'); Dups.dismiss(g); gEl.style.opacity = .3; setTimeout(() => gEl.remove(), 250); toast(`${n} removed`); };
-      const onKeep = () => { Dups.dismiss(g); gEl.remove(); };
+      const onKeep = () => { Dups.dismiss(g); gEl.remove(); toast('All kept — Iris won’t show this group again.', 3000); };
       const cnt = h('b', { style: 'font-size:14px' }, '');
       const binBtn = h('button', { class: 'btn sm danger', onclick: onRemove }, 'Remove');
       const remWrap = h('span', { style: 'display:none;align-items:center;gap:6px' }, binBtn, cnt);
@@ -1678,7 +1679,8 @@ async function renderLib() {
     h('div', { class: 'kv' }, h('span', {}, 'In the bin'), h('span', {}, fmtN(L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length))),
     h('div', { class: 'kv' }, h('span', {}, 'Collections'), h('span', {}, fmtN(L.colls.size))),
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Tips: search in any language, like “mi perro en la playa”. Add a minus to exclude: “beach -people”. Long-press a photo to select several.'),
-    h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections and folder links. Your photos are not touched.', 'Erase', true)) { await DB.clear(); location.reload(); } } }, 'Erase index'))));
+    ...(Dups.dismissed.size ? [h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm', onclick: () => { localStorage.removeItem('iris-dismissed'); Dups.dismissed.clear(); Dups.groups = null; toast('Hidden groups reset — Clean will regroup your duplicates.'); renderLib(); } }, 'Reset hidden groups'), h('span', { class: 'small', style: 'margin-left:8px' }, fmtN(Dups.dismissed.size) + ' duplicate groups are hidden for good (Keep all).'))] : []),
+    h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections, folder links and hidden duplicate groups. Your photos are not touched.', 'Erase', true)) { await DB.clear(); localStorage.removeItem('iris-dismissed'); location.reload(); } } }, 'Erase index'))));
 }
 
 /* ---------------- UI glue ---------------- */
