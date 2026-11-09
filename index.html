@@ -401,7 +401,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.45';
+const VER = 'Iris 2.46';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1341,7 +1341,7 @@ async function openColl(c) {
     h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
     grid(ids, { path: true })), true);
 }
-$('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); };
+$('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); else { toast('Iris couldn’t search for that — the AI may not be loaded. Nothing was saved.', 4500); go('coll'); } };
 
 /* ---------------- Best-of picker ---------------- */
 const Pick = {
@@ -1386,7 +1386,7 @@ $('#pGo').onclick = () => { if (!L.count) return toast('Add some photos first.')
 
 /* ---------------- Sharing & deleting ---------------- */
 async function shareIds(ids) {
-  if (NATIVE) { const ps = ids.slice(0, 100).map((id) => { const m = L.meta.get(id), f = L.folders.get(m?.folder); return f?.handle?.__native ? [f.handle.__native, ...m.path, m.name].join('/') : null; }).filter(Boolean); if (!ps.length) return toast('Nothing to share.'); window.IrisNative.share(JSON.stringify(ps)); return; }
+  if (NATIVE) { const ps = ids.slice(0, 100).map((id) => { const m = L.meta.get(id), f = L.folders.get(m?.folder); return f?.handle?.__native ? [f.handle.__native, ...m.path, m.name].join('/') : null; }).filter(Boolean); if (!ps.length) return toast('Nothing to share.'); window.IrisNative.share(JSON.stringify(ps)); if (ps.length < ids.length) toast(`Shared ${ps.length} of ${ids.length} — file-picked photos can’t be shared from the app.`, 4000); return; }
   if (!navigator.share) return toast('Sharing is not supported in this browser.');
   ids = ids.slice(0, 60); const files = [];
   for (const id of ids) { const f = await Folders.fileFor(id, true); if (f) files.push(f); }
@@ -1430,7 +1430,7 @@ const Viewer = {
     const d = new Date(m.mtime); $('#vTitle').textContent = `${m.name} · ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })} · ${m.w}×${m.h}` + (m.size ? ' · ' + fmtMB(m.size) : '');
     $('#vBin').textContent = m.status === 'trash' ? 'Restore' : 'Move to bin'; $('#vBin').classList.toggle('danger', m.status !== 'trash');
     $('#vPrev').style.visibility = this.i > 0 ? 'visible' : 'hidden'; $('#vNext').style.visibility = this.i < this.list.length - 1 ? 'visible' : 'hidden';
-    const u = await this.full(id).catch(() => null); $('#vFull').classList.toggle('hide', !!u);
+    const u = await this.full(id).catch(() => null); $('#vFull').classList.toggle('hide', !!u); $('#vFull').textContent = /\.(heic|heif)$/i.test(L.meta.get(id)?.name || '') ? 'Best view' : 'Full quality';
     if (u && this.list[this.i] === id) img.src = u;
     for (const k of [1, -1, 2]) { const n = this.list[this.i + k]; if (n) this.warm(n); }
   },
@@ -1503,7 +1503,7 @@ const Compare = {
     g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.verdict(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
     const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); Modal.close(); } }, 'Keep');
     const cnt = h('b', { style: 'font-size:15px' }, '');
-    const remBtn = h('button', { class: 'btn danger', onclick: () => { this.hooks?.onRemove?.(); Modal.close(); } }, 'Remove');
+    const remBtn = h('button', { class: 'btn danger', onclick: async () => { await this.hooks?.onRemove?.(); Modal.close(); } }, 'Remove');
     const remWrap = h('span', { style: 'display:none;align-items:center;gap:8px' }, remBtn, cnt);
     this.els = { stage, stageWrap, info, strip, keepBtn, remWrap, remBtn, cnt, prev, next };
     Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Iris marked its picks — grey with a ✕. Tap any photo, big or small, to change the pick. The last word is yours.'),
@@ -1572,7 +1572,7 @@ async function renderClean() {
   if (!L.count) { body.append(emptyLib()); return; }
   if (cTab === 'dup') {
     if (!Dups.groups) { body.append(h('p', { class: 'sub' }, 'Looking for duplicates…')); await sleep(30); await Dups.find(); if (tok !== RT_.clean) return; body.innerHTML = ''; }
-    const groups = Dups.groups.map((g) => ({ ...g, ids: g.ids.filter((id) => L.meta.get(id)?.status !== 'trash') })).filter((g) => g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.size, 0);
+    const groups = Dups.groups.map((g) => ({ ...g, ids: g.ids.filter((id) => L.meta.get(id)?.status !== 'trash') })).filter((g) => g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
     body.append(h('div', { class: 'card', style: 'margin-bottom:14px' },
       h('div', { class: 'rowf', style: 'align-items:flex-end' }, h('div', {}, h('div', { class: 'cnt' }, fmtN(groups.length), h('span', { class: 'small' }, ' groups')), h('p', {}, `${fmtN(total)} extra copies` + (bytes ? ` · ${fmtMB(bytes)} to free` : ''))),
         h('div', { class: 'field', style: 'margin:0' }, h('label', {}, 'Match closeness: ', h('b', {}, Math.round(Dups.thr * 100) + '%')), h('input', { type: 'range', min: '86', max: '99', value: String(Math.round(Dups.thr * 100)), onchange: (e) => { Dups.thr = e.target.value / 100; Dups.groups = null; renderClean(); } }))),
@@ -1607,7 +1607,7 @@ async function renderClean() {
     const cards = h('div', { class: 'cards' }); body.append(cards);
     for (const k of [...Object.keys(Junk.groups), 'blur', 'dark']) { const arr = out[k] || []; const gm = Junk.meta(k);
       const mini = h('div', { class: 'mini' }); arr.slice(0, 4).forEach((r) => { const im = h('img', { alt: '' }); Thumbs.url(r.id).then((u) => im.src = u); mini.append(im); }); for (let i = arr.length; i < 4; i++) mini.append(h('div'));
-      cards.append(h('div', { class: 'card click', onclick: () => arr.length && openJunk(k, arr.map((r) => r.id)) }, h('h3', {}, gm.icon + ' ' + gm.name), h('div', { class: 'cnt' }, fmtN(arr.length)), mini)); }
+      cards.append(h('div', { class: 'card' + (arr.length ? ' click' : ''), onclick: () => arr.length && openJunk(k, arr.map((r) => r.id)) }, h('h3', {}, gm.icon + ' ' + gm.name), h('div', { class: 'cnt' }, fmtN(arr.length)), mini)); }
     body.append(h('p', { class: 'small', style: 'margin-top:14px' }, 'These are AI guesses. Open a group, untick anything you want to keep, then move the rest to the bin.'));
   }
 }
@@ -1662,8 +1662,8 @@ async function renderLib() {
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, AI.state !== 'ok' ? h('button', { class: 'btn pri sm', onclick: () => ensureAI() }, cached ? 'Load AI' : `Download AI (${MODEL_MB} MB)`) : '', !cached && AI.state === 'err' ? h('button', { class: 'btn sm', onclick: () => $('#fModel').click() }, 'Load model from file') : '', // only a rescue for when the download fails
       cached ? h('button', { class: 'btn sm', onclick: async () => { if (await confirm2('Delete the downloaded AI?', 'You’ll need to download it again to search or add photos.', 'Delete', true)) { await caches.delete('iris-model-v2'); toast('Model deleted'); renderLib(); } } }, 'Delete model') : '')));
   const diag = h('pre', { style: 'white-space:pre-wrap;font-size:11px;max-height:220px;overflow:auto;background:#0004;padding:10px;border-radius:10px;margin:10px 0 0;color:var(--mute)' }, Log.lines.slice(-25).join('\n') || 'Nothing logged yet.');
-  b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Diagnostics · ' + VER), h('p', { class: 'small' }, 'If something misbehaves, tap Copy report and paste it to Hark.'), diag,
-    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:10px' }, h('button', { class: 'btn sm pri', onclick: async () => { const r = await Log.report(); try { await navigator.clipboard.writeText(r); toast('Report copied. Paste it to Hark.'); } catch { if (navigator.share) navigator.share({ text: r }).catch(() => {}); else toast('Couldn’t copy.'); } } }, 'Copy report'), h('button', { class: 'btn sm', onclick: () => renderLib() }, 'Refresh'))));
+  b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Diagnostics · ' + VER), h('p', { class: 'small' }, 'If something misbehaves, tap Copy report and paste it to Muse.'), diag,
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:10px' }, h('button', { class: 'btn sm pri', onclick: async () => { const r = await Log.report(); try { await navigator.clipboard.writeText(r); toast('Report copied. Paste it to Muse.'); } catch { if (navigator.share) navigator.share({ text: r }).catch(() => {}); else toast('Couldn’t copy.'); } } }, 'Copy report'), h('button', { class: 'btn sm', onclick: () => renderLib() }, 'Refresh'))));
   if (NATIVE && window.IrisNative?.battExempt) {
     let exempt = false; try { exempt = JSON.parse(window.IrisNative.battExempt()); } catch {}
     b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Working in the background'),
@@ -1734,7 +1734,7 @@ function go(v) { if (v !== cur) { NavStack.push(cur); if (NavStack.length > 30) 
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
 $('#binBtn').onclick = () => { if (Sel.on) endSel(); go('bin'); };
 $('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
-$('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
+$('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
 // "Folder, no pop-up" uses <input webkitdirectory>. Some Android browsers (Edge) ignore it silently, so watch for the
 // picker actually opening; if the page never loses focus, say so instead of doing nothing.
 function pickDir() {
@@ -1754,7 +1754,7 @@ function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
 }
-$('#obFile').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#fModel').click(); };
+$('#obFile').onclick = () => { $('#fModel').click(); };
 $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); };
 
 /* ---------------- Boot ---------------- */
