@@ -186,9 +186,9 @@ body.selon #mBody{padding-bottom:170px}
 #binBtn b{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;border-radius:99px;background:#ff5a6e;color:#fff;font-size:11px;line-height:19px;text-align:center}
 #binBtn b:empty{display:none}
 /* onboarding */
-#modal{z-index:35}
+#modal{z-index:45}
 #viewer{z-index:40}
-#selbar{z-index:37}
+#selbar{z-index:46}
 #onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(124,92,255,.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(40,210,230,.18),transparent 60%),var(--bg);overflow:auto}
 .ob{max-width:620px;margin:0 auto;padding:60px 24px 40px;text-align:center}
 .ob img.hero{width:120px;height:120px;border-radius:30px;box-shadow:0 30px 80px rgba(124,92,255,.45);animation:float 5s ease-in-out infinite}
@@ -400,7 +400,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.43';
+const VER = 'Iris 2.44';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -499,6 +499,7 @@ const Backup = {
       const r = await NativeSave.save(file);
       if (r === 'saved') { toast(`Backup saved as ${name}, in the place you chose — keep it somewhere safe.`, 5000); return; }
       if (r === 'cancel') return;
+      toast('This app shell is too old to save backups — update the shell, then try again.', 5000); return;
     }
     // In a browser: the system save dialog first, where offered; share next, and the plain
     // download last — and every path says where the file went.
@@ -1329,14 +1330,14 @@ async function renderColl() {
   for (const { ic, name, q, ids } of Sugg.cache.list) {
     const pct = totalLib ? Math.round(ids.length / totalLib * 1000) / 10 : 0;
     const mini = h('div', { class: 'mini' }); ids.slice(0, 4).forEach((id) => { const im = h('img', { alt: '' }); Thumbs.url(id).then((u) => im.src = u); mini.append(im); });
-    cards.append(h('div', { class: 'card click', onclick: () => { $('#q').value = q; S.img = null; $('#qimg').classList.add('hide'); go('search'); runSearch(); } }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos · ${pct}% of your library`), mini));
+    cards.append(h('div', { class: 'card click', onclick: () => Modal.open(h('div', {}, h('h2', {}, ic + ' ' + name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos · ${pct}% of your library`), grid(ids, { path: true })), true) }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos · ${pct}% of your library`), mini));
   }
 }
 async function openColl(c) {
   const ids = await collMembers(c);
   const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { c.z = +e.target.value; await DB.put('colls', c.id, c); openColl(c); } })) : '';
   Modal.open(h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
-    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); } }, 'Delete collection')),
+    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
     grid(ids, { path: true })), true);
 }
 $('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); };
