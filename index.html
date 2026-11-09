@@ -400,7 +400,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.41';
+const VER = 'Iris 2.42';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1494,13 +1494,17 @@ const Compare = {
     const stageWrap = h('div', { class: 'cmpStage' }, prev, stage, cross, next);
     const info = h('div', {});
     const strip = h('div', { class: 'cmpStrip' });
-    g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.show(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
+    /* Tapping a strip photo flips ITS mark and brings it to the stage — the same gesture as the grid
+       outside, where tapping a photo toggles it. (In 2.37–2.41 the strip only navigated, so inside the
+       preview Oscar could not take a ✕ off: 'ya no puedo quitar la selección y la X de estas fotos'.
+       The arrows remain the way to look at a photo without touching its mark.) */
+    g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.verdict(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
     const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); Modal.close(); } }, 'Keep');
     const cnt = h('b', { style: 'font-size:15px' }, '');
     const remBtn = h('button', { class: 'btn danger', onclick: () => { this.hooks?.onRemove?.(); Modal.close(); } }, 'Remove');
     const remWrap = h('span', { style: 'display:none;align-items:center;gap:8px' }, remBtn, cnt);
     this.els = { stage, stageWrap, info, strip, keepBtn, remWrap, remBtn, cnt, prev, next };
-    Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Iris marked its picks — grey with a ✕. Tap any photo to change the pick. The last word is yours.'),
+    Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Iris marked its picks — grey with a ✕. Tap any photo, big or small, to change the pick. The last word is yours.'),
       stageWrap, info,
       h('div', { class: 'bar' }, keepBtn, remWrap, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Done')), strip), true);
     this.show();
