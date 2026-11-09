@@ -400,7 +400,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.39';
+const VER = 'Iris 2.41';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1473,17 +1473,21 @@ document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contai
    Press-and-hold a photo in a duplicate group: the whole group opens big, one photo at a time in a
    FIXED frame — switching copies never moves the frame, so near-identical shots can be blink-compared
    and their differences jump out (Oscar: 'alisar las comparaciones para así saber cómo difieren').
-   A marked photo shows its state ON the big stage itself — greyed, with a big ✕ across it — the same
-   grey + ✕ as its tile and its strip thumb (Oscar: 'Seleccionar una imagen para eliminarla significa
-   volverla gris y ponerle una X encima, tacharla'). Tapping the stage photo flips the mark IN PLACE,
-   so taking the ✕ off is seen, not chased; the red 'Remove' / 'Keep' button records the same verdict
-   and then steps to the next copy by itself. Everything stays in step with the group's marks, its
-   tiles and the count beside the group's Remove button. */
+   IRIS PROPOSES, OSCAR DISPOSES (his settled doctrine, 2026-11-08 night): the group opens with
+   Iris's usual pick already marked — every copy but the ★ best, greyed with a ✕ (the same grey + ✕
+   as tile and strip thumb: 'Seleccionar una imagen para eliminarla significa volverla gris y
+   ponerle una X encima, tacharla'). He has the last word: tapping a photo flips its mark in place,
+   so any pick he dislikes is one tap from staying. There is no per-photo Keep button — the selection
+   only ever names what goes. The bar carries ONE action, swapped by state: with nothing marked,
+   'Keep' (keep the whole group, dismiss it); with anything marked, a red 'Remove' with the count of
+   marked photos beside it, which removes exactly what stands selected when he taps it. (The brief
+   2.40 experiment — groups opening empty — was his correction overshot: he never minded Iris
+   selecting; he minded not being able to overrule it.) */
 const Compare = {
-  g: null, marks: null, i: 0, updBin: null, row: null, els: null,
-  open(g, startId, marks, updBin, row) {
-    this.g = g; this.marks = marks; this.updBin = updBin; this.row = row; this.i = Math.max(0, g.ids.indexOf(startId));
-    const stage = h('img', { class: 'cmpImg', alt: '', onclick: () => this.verdict(false) });
+  g: null, marks: null, i: 0, updBin: null, row: null, els: null, hooks: null,
+  open(g, startId, marks, updBin, row, hooks) {
+    this.g = g; this.marks = marks; this.updBin = updBin; this.row = row; this.hooks = hooks || null; this.i = Math.max(0, g.ids.indexOf(startId));
+    const stage = h('img', { class: 'cmpImg', alt: '', onclick: () => this.verdict() });
     const cross = h('div', { class: 'cmpX' }, '✕');
     const prev = h('button', { class: 'cmpNav prev', onclick: () => this.step(-1) }, '‹');
     const next = h('button', { class: 'cmpNav next', onclick: () => this.step(1) }, '›');
@@ -1491,32 +1495,32 @@ const Compare = {
     const info = h('div', {});
     const strip = h('div', { class: 'cmpStrip' });
     g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.show(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
-    const toggle = h('button', { class: 'btn', onclick: () => this.flip() }, '');
-    this.els = { stage, stageWrap, info, strip, toggle, prev, next };
-    Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Same frame for every copy, so differences jump out. Marked = grey with a ✕. Decide, and it moves on to the next.'),
+    const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); Modal.close(); } }, 'Keep');
+    const cnt = h('b', { style: 'font-size:15px' }, '');
+    const remBtn = h('button', { class: 'btn danger', onclick: () => { this.hooks?.onRemove?.(); Modal.close(); } }, 'Remove');
+    const remWrap = h('span', { style: 'display:none;align-items:center;gap:8px' }, remBtn, cnt);
+    this.els = { stage, stageWrap, info, strip, keepBtn, remWrap, remBtn, cnt, prev, next };
+    Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Iris marked its picks — grey with a ✕. Tap any photo to change the pick. The last word is yours.'),
       stageWrap, info,
-      h('div', { class: 'bar' }, toggle, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Done')), strip), true);
+      h('div', { class: 'bar' }, keepBtn, remWrap, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Done')), strip), true);
     this.show();
   },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.g.ids.length) return; this.i = n; this.show(); },
-  /* One verdict, two doors: verdict(false) — tapping the stage photo — flips the mark IN PLACE, so
-     Oscar watches the grey and the ✕ come and go on the very photo he means ('no puedo quitar la X'
-     was the 2.38 wound). verdict(true) — the Remove/Keep button — records the same verdict and then
-     steps to the next copy by itself (his flow: 'elimino a la siguiente, elimino a la siguiente'), so
-     a whole group is decided in one pass; on the last copy it stays — Done is right there. */
-  verdict(advance) { const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); if (advance && this.i < this.g.ids.length - 1) this.i++; this.show(); },
-  flip() { this.verdict(true); },
+  /* Tapping the stage photo flips ITS mark in place — grey and ✕ come and go on the photo he means,
+     and the view does not move. Marking is the only per-photo act; removing is the bar's Remove. */
+  verdict() { const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); this.show(); },
   async show() {
-    const id = this.g.ids[this.i]; const m = L.meta.get(id); if (!m) return; const { stage, stageWrap, info, strip, toggle, prev, next } = this.els;
+    const id = this.g.ids[this.i]; const m = L.meta.get(id); if (!m) return; const { stage, stageWrap, info, strip, keepBtn, remWrap, cnt, prev, next } = this.els;
     stageWrap.classList.toggle('marked', this.marks.has(id));
     stage.src = await Thumbs.url(id);
     Viewer.full(id).then((u) => { if (u && this.g?.ids[this.i] === id && this.els) stage.src = u; }).catch(() => {});
     const d = new Date(m.mtime);
     info.innerHTML = ''; info.append(h('div', { class: 'cmpRoute' }, routeLabel(id)),
-      h('div', { class: 'small' }, `${m.name} · ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })} · ${m.w}×${m.h}` + (m.size ? ` · ${fmtMB(m.size)}` : '') + (id === this.g.best ? ' · ★ Best — the one that stays' : '')));
-    /* 'Remove' is remove — red button, no essay (Oscar). Its pair just says 'Keep'. */
-    toggle.textContent = this.marks.has(id) ? 'Keep' : 'Remove';
-    toggle.className = this.marks.has(id) ? 'btn pri' : 'btn danger';
+      h('div', { class: 'small' }, `${m.name} · ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })} · ${m.w}×${m.h}` + (m.size ? ` · ${fmtMB(m.size)}` : '') + (id === this.g.best ? ' · ★ Best' : '')));
+    /* One action at a time (Oscar): nothing marked → only 'Keep'; anything marked → 'Remove' + count. */
+    keepBtn.style.display = this.marks.size ? 'none' : '';
+    remWrap.style.display = this.marks.size ? 'inline-flex' : 'none';
+    cnt.textContent = String(this.marks.size);
     prev.style.visibility = this.i > 0 ? 'visible' : 'hidden'; next.style.visibility = this.i < this.g.ids.length - 1 ? 'visible' : 'hidden';
     [...strip.children].forEach((el, k) => { el.classList.toggle('on', k === this.i); el.classList.toggle('mark', this.marks.has(this.g.ids[k])); });
   },
@@ -1570,17 +1574,24 @@ async function renderClean() {
     if (!groups.length) body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '✨'), h('p', {}, 'No duplicates at this setting.')));
     const list = h('div'); body.append(list); let shown = 0;
     const addG = () => { for (const g of groups.slice(shown, shown + 30)) {
+      /* Iris PROPOSES, Oscar DISPOSES (his clarification, 2026-11-08 night): the group opens with
+         Iris's usual pick — every copy but the ★ best, marked grey + ✕ — and he has the last word:
+         tapping any photo deselects (or selects) it, and Remove removes only what stands selected.
+         Header action swaps by state: no marks → 'Keep all' (everything stays); any mark → red
+         'Remove' with the count beside it. */
       const marks = new Set(g.ids.slice(1)); const row = h('div', { class: 'row' });
-      /* Sencillito (Oscar): 'Keep all' keeps every photo and only hides the group; the remover is a
-         plain red 'Remove' and the count of selected photos sits BESIDE the button — nothing else. */
+      const onRemove = async () => { if (!marks.size) return; const n = marks.size; await setStatus([...marks], 'trash'); Dups.dismiss(g); gEl.style.opacity = .3; setTimeout(() => gEl.remove(), 250); toast(`${n} removed`); };
+      const onKeep = () => { Dups.dismiss(g); gEl.remove(); };
       const cnt = h('b', { style: 'font-size:14px' }, '');
-      const binBtn = h('button', { class: 'btn sm danger', onclick: async () => { if (!marks.size) return; await setStatus([...marks], 'trash'); Dups.dismiss(g); gEl.style.opacity = .3; setTimeout(() => gEl.remove(), 250); toast(`${marks.size} removed`); } }, 'Remove');
-      const updBin = () => { cnt.textContent = String(marks.size); binBtn.style.opacity = marks.size ? '' : '.45'; }; updBin();
+      const binBtn = h('button', { class: 'btn sm danger', onclick: onRemove }, 'Remove');
+      const remWrap = h('span', { style: 'display:none;align-items:center;gap:6px' }, binBtn, cnt);
+      const keepBtn = h('button', { class: 'btn sm', onclick: onKeep }, 'Keep all');
+      const updBin = () => { cnt.textContent = String(marks.size); keepBtn.style.display = marks.size ? 'none' : ''; remWrap.style.display = marks.size ? 'inline-flex' : 'none'; }; updBin();
       const gEl = h('div', { class: 'group' }, h('div', { class: 'gh' }, h('span', {}, `${g.ids.length} similar · ${new Date(L.meta.get(g.best).mtime).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` + ((n) => n > 1 ? ` · ${n} folders` : '')(new Set(g.ids.map((x) => locParts(x).join('/'))).size)), h('span', { class: 'sp' }),
-        h('button', { class: 'btn sm', onclick: () => { Dups.dismiss(g); gEl.remove(); } }, 'Keep all'), binBtn, cnt), row);
-      g.ids.forEach((id, i) => { const t = tile(id, i, g.ids, { locFull: true, badge: (x) => (x === g.best ? { text: '★ Best', cls: 'best' } : null), onTap: (x, el) => { if (marks.has(x)) marks.delete(x); else marks.add(x); el.classList.toggle('mark', marks.has(x)); updBin(); }, onLong: (x) => Compare.open(g, x, marks, updBin, row) }); if (marks.has(id)) t.classList.add('mark'); row.append(t); });
+        keepBtn, remWrap), row);
+      g.ids.forEach((id, i) => { const t = tile(id, i, g.ids, { locFull: true, badge: (x) => (x === g.best ? { text: '★ Best', cls: 'best' } : null), onTap: (x, el) => { if (marks.has(x)) marks.delete(x); else marks.add(x); el.classList.toggle('mark', marks.has(x)); updBin(); }, onLong: (x) => Compare.open(g, x, marks, updBin, row, { onRemove, onKeep }) }); if (marks.has(id)) t.classList.add('mark'); row.append(t); });
       list.append(gEl); } shown += 30; if (shown < groups.length) list.append(h('button', { class: 'btn', style: 'width:100%', onclick: (e) => { e.target.remove(); addG(); } }, 'Show more groups')); };
-    addG(); body.append(h('p', { class: 'small' }, 'Tip: tap a photo in a group to mark it for removal — it turns grey with a ✕. Tap again to keep it. Press and hold one to compare the whole group big. ★ marks the sharpest, best-lit shot.'));
+    addG(); body.append(h('p', { class: 'small' }, 'Tip: Iris pre-marks the copies it would remove — grey with a ✕. Tap any photo to change the selection; only the marked ones are removed. Press and hold one to compare the whole group big. ★ marks the sharpest, best-lit shot.'));
   }
   if (cTab === 'junk') {
     if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + Junk.normal[0]))) { body.append(h('div', { class: 'card' }, h('p', {}, 'The AI needs to be loaded to sort junk.'), h('button', { class: 'btn pri sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderClean(); } }, 'Load AI'))); return; }
