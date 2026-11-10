@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.55';
+const VER = 'Iris 2.56';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1782,6 +1782,7 @@ async function renderLib() {
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Tips: search in any language, like “mi perro en la playa”. Add a minus to exclude: “beach -people”. Long-press a photo to select several.'),
     ...(Dups.dismissed.size ? [h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm', onclick: () => { localStorage.removeItem('iris-dismissed'); Dups.dismissed.clear(); Dups.groups = null; toast('Hidden groups reset — Clean will regroup your duplicates.'); renderLib(); } }, 'Reset hidden groups'), h('span', { class: 'small', style: 'margin-left:8px' }, fmtN(Dups.dismissed.size) + ' duplicate groups are hidden for good (Keep all).'))] : []),
     h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections, folder links and hidden duplicate groups. Your photos are not touched.', 'Erase', true)) { await DB.clear(); localStorage.removeItem('iris-dismissed'); location.reload(); } } }, 'Erase index'))));
+  b.append(h('div', { style: 'text-align:center;color:var(--dim);font-size:12px;padding:14px 0 2px;letter-spacing:.3px' }, VER));
 }
 
 /* ---------------- UI glue ---------------- */
