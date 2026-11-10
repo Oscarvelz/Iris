@@ -244,6 +244,44 @@ body.selon #mBody{padding-bottom:170px}
   h1{font-size:21px}
 }
 @media (max-height:480px) and (min-width:521px){:root{--tile:92px}}
+
+/* —— Skin 2.52 · deep glass, sharper light (CSS only — no behaviour, no markup) ——
+   One direction over the whole app: the chrome recedes into tinted glass, the
+   violet→cyan identity light does the talking, and photos stay the only colour. */
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(900px 520px at 12% -12%,rgba(124,92,255,.12),transparent 62%),radial-gradient(820px 520px at 112% 112%,rgba(40,210,230,.08),transparent 62%)}
+.app{position:relative;z-index:1}
+header::after{content:"";position:absolute;left:18px;right:18px;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(124,92,255,.35),rgba(40,210,230,.25),transparent)}
+::selection{background:rgba(124,92,255,.45)}
+:focus-visible{outline:2px solid var(--a2);outline-offset:2px}
+main{scrollbar-width:thin;scrollbar-color:rgba(124,92,255,.45) transparent}
+main::-webkit-scrollbar{width:5px}
+main::-webkit-scrollbar-thumb{background:rgba(124,92,255,.4);border-radius:99px}
+.card,.group{background:linear-gradient(180deg,rgba(255,255,255,.065),rgba(255,255,255,.028));border-color:rgba(255,255,255,.11);box-shadow:0 12px 32px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.06)}
+@media(hover:hover){.card.click:hover{transform:translateY(-2px);border-color:rgba(124,92,255,.4);box-shadow:0 18px 40px rgba(0,0,0,.42),0 0 0 1px rgba(124,92,255,.12),inset 0 1px 0 rgba(255,255,255,.07)}}
+.btn{box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}
+.btn.pri{box-shadow:0 10px 34px rgba(124,92,255,.42),inset 0 1px 0 rgba(255,255,255,.25)}
+.btn.danger{box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.chip.on{box-shadow:0 4px 18px rgba(124,92,255,.25)}
+.seg button.on{background:linear-gradient(120deg,rgba(124,92,255,.30),rgba(40,210,230,.18));color:var(--text);box-shadow:inset 0 0 0 1px rgba(124,92,255,.35)}
+.nav button.on{background:linear-gradient(180deg,rgba(124,92,255,.22),rgba(40,210,230,.10));box-shadow:inset 0 0 0 1px rgba(124,92,255,.38),0 6px 18px rgba(124,92,255,.16)}
+.pill{background:rgba(20,20,32,.72);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.sb{background:linear-gradient(180deg,#12121f,#0d0d17)}
+.tile{border-radius:14px}
+.tile .badge{backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.tile .num{box-shadow:0 4px 14px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.25)}
+.tile.sel .ck{box-shadow:0 0 0 3px rgba(124,92,255,.35),0 4px 12px rgba(0,0,0,.45)}
+.cmpStage{box-shadow:0 18px 50px rgba(0,0,0,.5)}
+.cmpStrip button.on{box-shadow:0 0 0 2px rgba(124,92,255,.35)}
+.progress>div{box-shadow:0 0 12px rgba(124,92,255,.55)}
+.scrim{background:rgba(3,3,9,.78);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+.sheet{background:linear-gradient(180deg,#161624,#10101a);box-shadow:0 -18px 60px rgba(0,0,0,.55)}
+.sheet::before{content:"";display:block;width:38px;height:4px;border-radius:99px;background:rgba(255,255,255,.18);margin:0 auto 14px}
+#viewer .vtop{background:linear-gradient(rgba(2,2,8,.62),transparent)}
+#viewer .vacts{background:linear-gradient(transparent,rgba(2,2,8,.62))}
+#viewer .nv{background:rgba(12,12,22,.55);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.toast{background:rgba(26,26,40,.92);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);box-shadow:0 22px 55px rgba(0,0,0,.55),0 0 0 1px rgba(124,92,255,.10)}
+#selbar{background:rgba(22,22,34,.92);backdrop-filter:blur(16px) saturate(1.35);-webkit-backdrop-filter:blur(16px) saturate(1.35);box-shadow:0 18px 48px rgba(0,0,0,.6),0 0 0 1px rgba(124,92,255,.12)}
+.step{box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 </style>
 </head>
 <body>
@@ -401,7 +439,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.51';
+const VER = 'Iris 2.52';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
