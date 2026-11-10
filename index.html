@@ -9,11 +9,13 @@
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
 <title>Iris</title>
+<script>try { var __t = localStorage.getItem('iris-theme'); if (__t && __t !== 'obsidian') { document.documentElement.dataset.theme = __t; var __m = document.querySelector('meta[name="theme-color"]'); var __b = { aurora: '#04120e', ember: '#100605', porcelain: '#f3f3f7' }[__t]; if (__m && __b) __m.setAttribute('content', __b); } } catch (e) {}</script>
 <style>
 :root{
   --bg:#07070d; --bg2:#0e0e18; --card:rgba(255,255,255,.045); --card2:rgba(255,255,255,.08);
   --line:rgba(255,255,255,.09); --text:#eeeef6; --mute:#9a9ab3; --dim:#6b6b85;
   --a1:#7c5cff; --a2:#28d2e6; --a3:#ff5a96; --ok:#4ade80; --bad:#ff5a6e; --warn:#ffb85a;
+  --a1rgb:124,92,255; --a2rgb:40,210,230;
   --grad:linear-gradient(120deg,var(--a1),var(--a2));
   --r:18px; --tile:118px;
   --safe-b:min(env(safe-area-inset-bottom,0px),40px);
@@ -49,8 +51,8 @@ h2{font-size:19px;margin:22px 0 10px;letter-spacing:-.2px}
 .grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 /* search */
 .searchbox{position:sticky;top:0;z-index:4;padding:6px 0 10px;background:linear-gradient(var(--bg) 75%,transparent)}
-.sb{display:flex;align-items:center;gap:10px;padding:6px 6px 6px 16px;border-radius:22px;background:var(--bg2);border:1px solid var(--line);box-shadow:0 10px 40px rgba(124,92,255,.10);transition:.2s}
-.sb:focus-within{border-color:rgba(124,92,255,.6);box-shadow:0 10px 50px rgba(124,92,255,.25)}
+.sb{display:flex;align-items:center;gap:10px;padding:6px 6px 6px 16px;border-radius:22px;background:var(--bg2);border:1px solid var(--line);box-shadow:0 10px 40px rgba(var(--a1rgb),.10);transition:.2s}
+.sb:focus-within{border-color:rgba(var(--a1rgb),.6);box-shadow:0 10px 50px rgba(var(--a1rgb),.25)}
 .sb input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:18px;padding:10px 0}
 .sb .qimg{width:42px;height:42px;border-radius:12px;object-fit:cover;border:2px solid var(--a2)}
 .iconbtn{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:var(--card);flex:none}
@@ -59,13 +61,13 @@ h2{font-size:19px;margin:22px 0 10px;letter-spacing:-.2px}
 .chips{display:flex;gap:8px;overflow-x:auto;padding:10px 0 2px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
 .chip{flex:none;padding:8px 14px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-size:13.5px;color:var(--mute);white-space:nowrap;transition:.15s}
-.chip:active{transform:scale(.96)} .chip.on{background:rgba(124,92,255,.18);border-color:rgba(124,92,255,.55);color:var(--text)}
+.chip:active{transform:scale(.96)} .chip.on{background:rgba(var(--a1rgb),.18);border-color:rgba(var(--a1rgb),.55);color:var(--text)}
 .chip.neg{border-color:rgba(255,90,110,.5)}
 .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0 12px;color:var(--mute);font-size:13.5px}
 .bar .sp{flex:1}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 18px;border-radius:14px;background:var(--card2);border:1px solid var(--line);font-weight:600;font-size:14.5px;transition:.15s;white-space:nowrap}
 .btn:active{transform:scale(.97)} .btn:disabled{opacity:.4;pointer-events:none}
-.btn.pri{background:var(--grad);border:0;color:#fff;box-shadow:0 8px 30px rgba(124,92,255,.35)}
+.btn.pri{background:var(--grad);border:0;color:#fff;box-shadow:0 8px 30px rgba(var(--a1rgb),.35)}
 .btn.danger{background:rgba(255,90,110,.15);border-color:rgba(255,90,110,.45);color:#ffb3bd}
 .btn.sm{padding:8px 13px;font-size:13px;border-radius:12px}
 .btn svg{width:18px;height:18px}
@@ -144,7 +146,7 @@ input[type=range]{width:100%;accent-color:var(--a1)}
 .idx img{width:64px;height:64px;border-radius:12px;object-fit:cover;background:var(--bg2)}
 .idx .meta{flex:1;min-width:0}
 .kv{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line);font-size:14px}.kv span:first-child{color:var(--mute)}
-.banner{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:16px;background:linear-gradient(120deg,rgba(124,92,255,.16),rgba(40,210,230,.10));border:1px solid rgba(124,92,255,.35);margin:6px 0 12px;font-size:14px}
+.banner{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:16px;background:linear-gradient(120deg,rgba(var(--a1rgb),.16),rgba(var(--a2rgb),.10));border:1px solid rgba(var(--a1rgb),.35);margin:6px 0 12px;font-size:14px}
 .banner .sp{flex:1}
 /* overlays */
 .ov{position:fixed;inset:0;z-index:20;display:none}
@@ -189,9 +191,9 @@ body.selon #mBody{padding-bottom:170px}
 #modal{z-index:45}
 #viewer{z-index:40}
 #selbar{z-index:46}
-#onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(124,92,255,.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(40,210,230,.18),transparent 60%),var(--bg);overflow:auto}
+#onboard{z-index:30;background:radial-gradient(1200px 700px at 50% -10%,rgba(var(--a1rgb),.35),transparent 60%),radial-gradient(900px 600px at 100% 100%,rgba(var(--a2rgb),.18),transparent 60%),var(--bg);overflow:auto}
 .ob{max-width:620px;margin:0 auto;padding:60px 24px 40px;text-align:center}
-.ob img.hero{width:120px;height:120px;border-radius:30px;box-shadow:0 30px 80px rgba(124,92,255,.45);animation:float 5s ease-in-out infinite}
+.ob img.hero{width:120px;height:120px;border-radius:30px;box-shadow:0 30px 80px rgba(var(--a1rgb),.45);animation:float 5s ease-in-out infinite}
 @keyframes float{50%{transform:translateY(-8px) rotate(3deg)}}
 .ob h1{font-size:40px;margin:22px 0 8px}
 .steps{text-align:left;margin:26px 0;display:flex;flex-direction:column;gap:10px}
@@ -248,39 +250,39 @@ body.selon #mBody{padding-bottom:170px}
 /* —— Skin 2.52 · deep glass, sharper light (CSS only — no behaviour, no markup) ——
    One direction over the whole app: the chrome recedes into tinted glass, the
    violet→cyan identity light does the talking, and photos stay the only colour. */
-body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(900px 520px at 12% -12%,rgba(124,92,255,.12),transparent 62%),radial-gradient(820px 520px at 112% 112%,rgba(40,210,230,.08),transparent 62%)}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(900px 520px at 12% -12%,rgba(var(--a1rgb),.12),transparent 62%),radial-gradient(820px 520px at 112% 112%,rgba(var(--a2rgb),.08),transparent 62%)}
 .app{position:relative;z-index:1}
-header::after{content:"";position:absolute;left:18px;right:18px;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(124,92,255,.35),rgba(40,210,230,.25),transparent)}
-::selection{background:rgba(124,92,255,.45)}
+header::after{content:"";position:absolute;left:18px;right:18px;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(var(--a1rgb),.35),rgba(var(--a2rgb),.25),transparent)}
+::selection{background:rgba(var(--a1rgb),.45)}
 :focus-visible{outline:2px solid var(--a2);outline-offset:2px}
-main{scrollbar-width:thin;scrollbar-color:rgba(124,92,255,.45) transparent}
+main{scrollbar-width:thin;scrollbar-color:rgba(var(--a1rgb),.45) transparent}
 main::-webkit-scrollbar{width:5px}
-main::-webkit-scrollbar-thumb{background:rgba(124,92,255,.4);border-radius:99px}
+main::-webkit-scrollbar-thumb{background:rgba(var(--a1rgb),.4);border-radius:99px}
 .card,.group{background:linear-gradient(180deg,rgba(255,255,255,.065),rgba(255,255,255,.028));border-color:rgba(255,255,255,.11);box-shadow:0 12px 32px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.06)}
-@media(hover:hover){.card.click:hover{transform:translateY(-2px);border-color:rgba(124,92,255,.4);box-shadow:0 18px 40px rgba(0,0,0,.42),0 0 0 1px rgba(124,92,255,.12),inset 0 1px 0 rgba(255,255,255,.07)}}
+@media(hover:hover){.card.click:hover{transform:translateY(-2px);border-color:rgba(var(--a1rgb),.4);box-shadow:0 18px 40px rgba(0,0,0,.42),0 0 0 1px rgba(var(--a1rgb),.12),inset 0 1px 0 rgba(255,255,255,.07)}}
 .btn{box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}
-.btn.pri{box-shadow:0 10px 34px rgba(124,92,255,.42),inset 0 1px 0 rgba(255,255,255,.25)}
+.btn.pri{box-shadow:0 10px 34px rgba(var(--a1rgb),.42),inset 0 1px 0 rgba(255,255,255,.25)}
 .btn.danger{box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
-.chip.on{box-shadow:0 4px 18px rgba(124,92,255,.25)}
-.seg button.on{background:linear-gradient(120deg,rgba(124,92,255,.30),rgba(40,210,230,.18));color:var(--text);box-shadow:inset 0 0 0 1px rgba(124,92,255,.35)}
-.nav button.on{background:linear-gradient(180deg,rgba(124,92,255,.22),rgba(40,210,230,.10));box-shadow:inset 0 0 0 1px rgba(124,92,255,.38),0 6px 18px rgba(124,92,255,.16)}
+.chip.on{box-shadow:0 4px 18px rgba(var(--a1rgb),.25)}
+.seg button.on{background:linear-gradient(120deg,rgba(var(--a1rgb),.30),rgba(var(--a2rgb),.18));color:var(--text);box-shadow:inset 0 0 0 1px rgba(var(--a1rgb),.35)}
+.nav button.on{background:linear-gradient(180deg,rgba(var(--a1rgb),.22),rgba(var(--a2rgb),.10));box-shadow:inset 0 0 0 1px rgba(var(--a1rgb),.38),0 6px 18px rgba(var(--a1rgb),.16)}
 .pill{background:rgba(20,20,32,.72);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
-.sb{background:linear-gradient(180deg,#12121f,#0d0d17)}
+.sb{background:linear-gradient(180deg,var(--bg2),var(--bg))}
 .tile{border-radius:14px}
 .tile .badge{backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
 .tile .num{box-shadow:0 4px 14px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.25)}
-.tile.sel .ck{box-shadow:0 0 0 3px rgba(124,92,255,.35),0 4px 12px rgba(0,0,0,.45)}
+.tile.sel .ck{box-shadow:0 0 0 3px rgba(var(--a1rgb),.35),0 4px 12px rgba(0,0,0,.45)}
 .cmpStage{box-shadow:0 18px 50px rgba(0,0,0,.5)}
-.cmpStrip button.on{box-shadow:0 0 0 2px rgba(124,92,255,.35)}
-.progress>div{box-shadow:0 0 12px rgba(124,92,255,.55)}
+.cmpStrip button.on{box-shadow:0 0 0 2px rgba(var(--a1rgb),.35)}
+.progress>div{box-shadow:0 0 12px rgba(var(--a1rgb),.55)}
 .scrim{background:rgba(3,3,9,.78);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
 .sheet{background:linear-gradient(180deg,#161624,#10101a);box-shadow:0 -18px 60px rgba(0,0,0,.55)}
 .sheet::before{content:"";display:block;width:38px;height:4px;border-radius:99px;background:rgba(255,255,255,.18);margin:0 auto 14px}
 #viewer .vtop{background:linear-gradient(rgba(2,2,8,.62),transparent)}
 #viewer .vacts{background:linear-gradient(transparent,rgba(2,2,8,.62))}
 #viewer .nv{background:rgba(12,12,22,.55);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
-.toast{background:rgba(26,26,40,.92);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);box-shadow:0 22px 55px rgba(0,0,0,.55),0 0 0 1px rgba(124,92,255,.10)}
-#selbar{background:rgba(22,22,34,.92);backdrop-filter:blur(16px) saturate(1.35);-webkit-backdrop-filter:blur(16px) saturate(1.35);box-shadow:0 18px 48px rgba(0,0,0,.6),0 0 0 1px rgba(124,92,255,.12)}
+.toast{background:rgba(26,26,40,.92);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);box-shadow:0 22px 55px rgba(0,0,0,.55),0 0 0 1px rgba(var(--a1rgb),.10)}
+#selbar{background:rgba(22,22,34,.92);backdrop-filter:blur(16px) saturate(1.35);-webkit-backdrop-filter:blur(16px) saturate(1.35);box-shadow:0 18px 48px rgba(0,0,0,.6),0 0 0 1px rgba(var(--a1rgb),.12)}
 .step{box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 
 /* —— Skin 2.53 · bloom (CSS only) —— Oscar's direction: subtle animations that
@@ -304,6 +306,33 @@ main::-webkit-scrollbar-thumb{background:rgba(124,92,255,.4);border-radius:99px}
   .ob .step:nth-child(1){animation-delay:.06s}.ob .step:nth-child(2){animation-delay:.14s}.ob .step:nth-child(3){animation-delay:.22s}.ob .step:nth-child(4){animation-delay:.30s}
   .ob .btn.pri{animation:rise .55s .34s cubic-bezier(.2,.9,.3,1) both}
 }
+
+/* —— Themes 2.54 (skin system) —— One token skin, four faces. Obsidian is the
+   :root default (no attribute). Every other theme only re-points the tokens
+   (plus, for Porcelain, the handful of surfaces that were hardcoded dark).
+   Semantic colours (ok/bad/warn, the ✕ of a mark) never change with theme. */
+#g stop:first-child{stop-color:var(--a1)}
+#g stop:last-child{stop-color:var(--a2)}
+:root[data-theme="aurora"]{--bg:#04120e;--bg2:#0a1f19;--text:#eafff6;--mute:#9db8ab;--dim:#678577;--a1:#2fe6a8;--a2:#38c8ff;--a3:#b18cff;--a1rgb:47,230,168;--a2rgb:56,200,255}
+:root[data-theme="ember"]{--bg:#100605;--bg2:#1c0e08;--text:#fff4e6;--mute:#c7a88f;--dim:#8f7260;--a1:#ff9a3d;--a2:#ff5a5f;--a3:#ffd23d;--a1rgb:255,154,61;--a2rgb:255,90,95}
+:root[data-theme="porcelain"]{--bg:#f3f3f7;--bg2:#ffffff;--card:rgba(26,26,64,.05);--card2:rgba(26,26,64,.09);--line:rgba(26,26,64,.13);--text:#1a1a26;--mute:#5d5d74;--dim:#9a9aad;--a1:#6d4aff;--a2:#0899bd;--a3:#f43f8e;--a1rgb:109,74,255;--a2rgb:8,153,189}
+:root[data-theme="porcelain"] .nav{background:rgba(255,255,255,.94)}
+:root[data-theme="porcelain"] .sb{background:linear-gradient(180deg,#ffffff,#f2f2f8);box-shadow:0 10px 30px rgba(80,70,180,.10)}
+:root[data-theme="porcelain"] .card,:root[data-theme="porcelain"] .group{background:linear-gradient(180deg,#ffffff,rgba(255,255,255,.6));box-shadow:0 12px 30px rgba(50,45,120,.10),inset 0 1px 0 #ffffff}
+:root[data-theme="porcelain"] .sheet{background:linear-gradient(180deg,#ffffff,#f3f3f8)}
+:root[data-theme="porcelain"] .sheet::before{background:rgba(26,26,64,.20)}
+:root[data-theme="porcelain"] .toast{background:rgba(255,255,255,.95);box-shadow:0 22px 55px rgba(50,45,120,.22)}
+:root[data-theme="porcelain"] #selbar{background:rgba(255,255,255,.95);box-shadow:0 18px 48px rgba(50,45,120,.25)}
+:root[data-theme="porcelain"] .pill{background:rgba(255,255,255,.82)}
+:root[data-theme="porcelain"] .btn.danger{color:#c22438}
+:root[data-theme="porcelain"] #selbar .sa.dz{color:#c22438}
+.themes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:4px}
+.theme{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 2px 10px;border-radius:15px;border:1px solid var(--line);background:var(--card);transition:.15s;min-width:0}
+.theme:active{transform:scale(.96)}
+.theme .sw{width:38px;height:38px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25),0 6px 16px rgba(0,0,0,.30);flex:none}
+.theme .tn{font-size:12.5px;font-weight:650}
+.theme small{font-size:10.5px;color:var(--dim);text-align:center;line-height:1.3}
+.theme.on{border-color:rgba(var(--a1rgb),.65);box-shadow:0 0 0 1px rgba(var(--a1rgb),.40)}
 </style>
 </head>
 <body>
@@ -461,7 +490,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.53';
+const VER = 'Iris 2.54';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1697,6 +1726,14 @@ function openJunk(k, ids) {
 }
 
 /* ---------------- Library view ---------------- */
+const THEMES = [
+  { id: 'obsidian', name: 'Obsidian', desc: 'Violet & cyan on deep black', c1: '#7c5cff', c2: '#28d2e6', bar: '#07070d' },
+  { id: 'aurora', name: 'Aurora', desc: 'Emerald & sky on green night', c1: '#2fe6a8', c2: '#38c8ff', bar: '#04120e' },
+  { id: 'ember', name: 'Ember', desc: 'Amber & coral on warm dark', c1: '#ff9a3d', c2: '#ff5a5f', bar: '#100605' },
+  { id: 'porcelain', name: 'Porcelain', desc: 'The light one — ink on white', c1: '#6d4aff', c2: '#0899bd', bar: '#f3f3f7' },
+];
+function applyTheme(id, save) { const t = THEMES.find((x) => x.id === id) || THEMES[0]; if (t.id === 'obsidian') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t.id; const m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute('content', t.bar); if (save) { try { localStorage.setItem('iris-theme', t.id); } catch (e) {} } return t.id; }
+function themeNow() { try { return localStorage.getItem('iris-theme') || 'obsidian'; } catch (e) { return 'obsidian'; } }
 async function renderLib() {
   const b = $('#libBody'); b.innerHTML = '';
   const idx = h('div', { id: 'idxCard' }); b.append(idx); UI.renderIndex();
@@ -1712,6 +1749,9 @@ async function renderLib() {
     bs.forEach((b) => { b.style.minWidth = '0'; b.style.paddingInline = '8px'; });
     folders.append(h('div', { style: `display:grid;grid-template-columns:repeat(${bs.length},minmax(0,1fr));gap:8px;margin-top:12px` }, ...bs)); }
   b.append(folders);
+  const appear = h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Appearance'), h('p', {}, 'Pick a theme — it applies everywhere, instantly, and Iris remembers it.'));
+  { const cur = themeNow(); const row = h('div', { class: 'themes' }); for (const t of THEMES) row.append(h('button', { class: 'theme' + (t.id === cur ? ' on' : ''), onclick: () => { applyTheme(t.id, true); renderLib(); } }, h('span', { class: 'sw', style: `background:linear-gradient(135deg,${t.c1},${t.c2})` }), h('span', { class: 'tn' }, t.name), h('small', {}, t.desc))); appear.append(row); }
+  b.append(appear);
   let est = {}; try { est = await navigator.storage.estimate(); } catch {}
   const cached = await AI.cached();
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'AI model'),
@@ -1819,6 +1859,7 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
 
 /* ---------------- Boot ---------------- */
 (async function boot() {
+  applyTheme(themeNow(), false);
   if ('serviceWorker' in navigator) {
     // Updates must arrive on their own (2.48). Oscar's phone sat a version behind through a whole
     // morning of close/reopen cycles: the bare register() left update checks to navigation
