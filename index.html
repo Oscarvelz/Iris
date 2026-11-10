@@ -401,7 +401,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.49';
+const VER = 'Iris 2.50';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1660,7 +1660,7 @@ async function renderLib() {
     h('div', { class: 'kv' }, h('span', {}, 'Speed'), h('span', {}, AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : '—')),
     h('div', { class: 'kv' }, h('span', {}, 'Storage used'), h('span', {}, est.usage ? fmtMB(est.usage) : '—')),
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' }, AI.state !== 'ok' ? h('button', { class: 'btn pri sm', onclick: () => ensureAI() }, cached ? 'Load AI' : `Download AI (${MODEL_MB} MB)`) : '', !cached && AI.state === 'err' ? h('button', { class: 'btn sm', onclick: () => $('#fModel').click() }, 'Load model from file') : '', // only a rescue for when the download fails
-      cached ? h('button', { class: 'btn sm', onclick: async () => { if (await confirm2('Delete the downloaded AI?', 'You’ll need to download it again to search or add photos.', 'Delete', true)) { await caches.delete('iris-model-v2'); toast('Model deleted'); renderLib(); } } }, 'Delete model') : '')));
+      cached ? h('button', { class: 'btn sm', onclick: async () => { if (await confirm2('Delete the downloaded AI?', 'You’ll need to download it again to search or add photos.', 'Delete', true)) { const man = await AI.manifest(); await caches.delete('iris-model-v2'); toast(man ? 'Model deleted' : 'No downloaded copy to delete — the model loaded from a file stays in memory until you close Iris.', man ? 2600 : 4500); renderLib(); } } }, 'Delete model') : '')));
   const diag = h('pre', { style: 'white-space:pre-wrap;font-size:11px;max-height:220px;overflow:auto;background:#0004;padding:10px;border-radius:10px;margin:10px 0 0;color:var(--mute)' }, Log.lines.slice(-25).join('\n') || 'Nothing logged yet.');
   b.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('h3', {}, 'Diagnostics · ' + VER), h('p', { class: 'small' }, 'If something misbehaves, tap Copy report and paste it to Muse.'), diag,
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:10px' }, h('button', { class: 'btn sm pri', onclick: async () => { const r = await Log.report(); try { await navigator.clipboard.writeText(r); toast('Report copied. Paste it to Muse.'); } catch { if (navigator.share) navigator.share({ text: r }).catch(() => {}); else toast('Couldn’t copy.'); } } }, 'Copy report'), h('button', { class: 'btn sm', onclick: () => renderLib() }, 'Refresh'))));
