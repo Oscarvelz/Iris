@@ -401,7 +401,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.50';
+const VER = 'Iris 2.51';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1632,7 +1632,7 @@ function renderBin() {
 function openJunk(k, ids) {
   const keep = new Set(); const gm = Junk.meta(k);
   Modal.open(h('div', {}, h('h2', {}, gm.icon + ' ' + gm.name), h('p', { class: 'sub' }, 'Everything marked ✕ goes to the bin. Tap a photo to keep it.'),
-    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id)); await setStatus(go2, 'trash'); Modal.close(); renderClean(); toast(`${go2.length} moved to the bin`); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Cancel')),
+    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id)); await setStatus(go2, 'trash'); Modal.close(); renderClean(); toast(`${go2.length} moved to the bin`); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close(true) }, 'Cancel')),
     grid(ids, { loc: true, cls: () => ' mark', onTap: (id, t) => { if (keep.has(id)) keep.delete(id); else keep.add(id); t.classList.toggle('mark', !keep.has(id)); } })), true);
 }
 
@@ -1704,7 +1704,7 @@ const UI = {
       else if (I.running) ban.append(h('div', { class: 'banner' }, h('span', { style: 'min-width:0' }, innerWidth < 600 ? `✦ ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' · finding more' : ` · ${fmtDur(eta)} left`) : `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' (still finding more)' : `, about ${fmtDur(eta)} left`)), h('span', { class: 'sp' }), h('button', { class: 'btn sm', title: 'How hard Iris works your phone while indexing', onclick: () => Indexer.cycleSpeed() }, Indexer.speedLabel()), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
       else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
       else if (AI.state === 'busy' && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, 'Getting the AI ready. This takes up to a minute the first time…')));
-      else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
+      else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, L.folders.size === 1 ? `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?` : `${L.folders.size} folders are linked. Ready to read them?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
       else if (UI.pendingScan && L.folders.size) ban.append(h('div', { class: 'banner' }, h('span', {}, `Paused at ${fmtN(L.count)} photos because Iris was closed or reloaded.`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Continue')));
       else if (L.count && L.folders.size && [...L.folders.values()].some((f) => Date.now() - (f.lastScan || 0) > 864e5)) ban.append(h('div', { class: 'banner' }, h('span', {}, 'New photos since last time?'), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Check now'))); }
   },
