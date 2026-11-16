@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.56';
+const VER = 'Iris 2.57';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -690,7 +690,7 @@ function stats(arr) { let m = 0; for (const v of arr) m += v; m /= arr.length ||
 
 /* ---------------- Model ---------------- */
 const AI = {
-  mp: null, fileset: null, emb: null, state: 'off', textCache: new Map(), msPer: 0,
+  mp: null, fileset: null, emb: null, state: 'off', textCache: new Map(), msPer: 0, WT: { init: 180000, text: 30000, image: 120000 },
   setPill(state, text) { const was = this.state; this.state = state; if (was !== state) setTimeout(() => UI.renderIndex?.(), 0); $('#pdot').className = 'dot ' + ({ ok: 'ok', busy: 'busy', err: 'err' }[state] || ''); $('#ptext').textContent = text; },
   async runtime() {
     if (!this.mp) this.mp = await import(RT + '/retrieval_bundle.mjs');
@@ -712,8 +712,8 @@ const AI = {
       const a = i * this.PART, b = total ? Math.min(total, a + this.PART) - 1 : a + this.PART - 1;
       let lastErr;
       for (let t = 0; t < 5; t++) {
-        try { const r = await fetch(MODEL_URL, { headers: { Range: `bytes=${a}-${b}` }, cache: 'no-store' }); if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status); return r; }
-        catch (e) { lastErr = e; await sleep(1000 * (t + 1) ** 2); }
+        try { const r = await fetch(MODEL_URL, { headers: { Range: `bytes=${a}-${b}` }, cache: 'no-store' }); if (r.status === 200 && i > 0) { const bad = new Error('the server answered part ' + i + ' without honouring the range request'); bad.fatal = true; throw bad; } if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status); return r; }
+        catch (e) { if (e.fatal) throw e; lastErr = e; await sleep(1000 * (t + 1) ** 2); }
       }
       throw new Error('Network problem while downloading (' + (lastErr?.message || 'unknown') + '). Tap the status to resume.');
     };
@@ -722,17 +722,23 @@ const AI = {
     if (first.status === 200) { // no range support: whole file in one go
       const total = +first.headers.get('content-length') || MODEL_MB * 1e6; const reader = first.body.getReader(); const chunks = []; let got = 0;
       for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.byteLength; const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); }
+      if (first.headers.get('content-length') && got !== total) throw new Error('The model download was corrupted (received ' + got + ' of ' + total + ' bytes). Nothing was saved. Tap the status to download it again.');
       this.blob = new Blob(chunks); let n = 0;
       try { for (let a = 0; a < this.blob.size; a += this.PART, n++) await this.putPart(c, n, await this.blob.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: this.blob.size, parts: n }))); this.blob = null; } catch (e) { console.warn('model kept in memory only', e); toast('Model works now but couldn\u2019t be saved, so it will download again next time.', 6000); }
       return;
     }
     const total = +((first.headers.get('content-range') || '').split('/')[1]) || MODEL_MB * 1e6; const parts = Math.ceil(total / this.PART);
     let got = 0; const tick = () => { const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); };
+    const corrupt = async (why) => { for (let j = 0; j < parts; j++) { try { await c.delete(this.key(j)); } catch {} } try { await c.delete(this.MAN); } catch {} throw new Error('The model download was corrupted (' + why + '). Nothing was saved. Tap the status to download it again.'); };
     for (let i = 0; i < parts; i++) {
-      if (await c.match(this.key(i))) { got += Math.min(this.PART, total - i * this.PART); tick(); continue; } // resume
-      let buf; for (let t = 0; t < 3 && !buf; t++) { try { const r = i === 0 ? first : await getPart(i, total); buf = await r.arrayBuffer(); } catch (e) { if (t === 2) throw e; await sleep(1500); } }
+      const want = Math.min(this.PART, total - i * this.PART);
+      const prev = await c.match(this.key(i));
+      if (prev) { if ((await prev.arrayBuffer()).byteLength === want) { got += want; tick(); continue; } await c.delete(this.key(i)); } // resume trusts a stored part only at exactly the right size
+      let buf; for (let t = 0; t < 3 && !buf; t++) { try { const r = i === 0 ? first : await getPart(i, total); buf = await r.arrayBuffer(); } catch (e) { if (e.fatal) await corrupt(e.message); if (t === 2) throw e; await sleep(1500); } }
+      if (buf.byteLength !== want) await corrupt('part ' + i + ' arrived with ' + buf.byteLength + ' bytes instead of ' + want);
       await this.putPart(c, i, buf); got += buf.byteLength; tick();
     }
+    if (got !== total) await corrupt('the parts add up to ' + got + ' bytes instead of ' + total);
     await c.put(this.MAN, new Response(JSON.stringify({ total, parts })));
   },
   async stream() {
@@ -752,8 +758,6 @@ const AI = {
     this._loading = (async () => {
       try {
         if (!(await this.cached())) await this.download();
-        let adapter = null; try { adapter = await navigator.gpu?.requestAdapter(); } catch {}
-        if (!adapter) throw new Error('This browser can\u2019t reach the graphics chip (WebGPU), which the AI needs. Update your browser.');
         this.setPill('busy', 'Starting AI…');
         try { this.emb = await this.startWorker(); }
         catch (we) { // worker failed: run on the page instead (may feel slower)
@@ -775,14 +779,23 @@ const AI = {
   startWorker() {
     return new Promise((resolve, reject) => {
       const w = new Worker('ai-worker.js'); this.worker = w; const pend = new Map(); let seq = 0; // classic worker since 2.47 (the classic WASM loader registers via importScripts) — comment AFTER the full statement: in 2.47 it sat mid-line and commented out everything after it, seq included
-      const call = (op, arg, transfer = []) => new Promise((res, rej) => { const id = ++seq; pend.set(id, { res, rej }); w.postMessage({ id, op, arg }, transfer); });
-      w.onmessage = ({ data }) => { if (data.progress != null) { this.setPill('busy', `Loading AI ${data.progress}%`); return; } const p = pend.get(data.id); if (!p) return; pend.delete(data.id); data.ok ? p.res(data.r) : p.rej(new Error(data.err)); };
-      w.onerror = (e) => { e.preventDefault?.(); for (const p of pend.values()) p.rej(new Error(e.message || 'AI worker crashed')); pend.clear(); reject(new Error(e.message || 'AI worker failed')); };
+      const die = (err) => {
+        if (this.worker !== w) return;
+        this.worker = null; this.emb = null; this._loading = null;
+        try { w.terminate(); } catch {}
+        for (const p of pend.values()) { clearTimeout(p.t); p.rej(err); }
+        pend.clear();
+        this.lastErr = err; this.setPill('err', 'AI error: tap for details'); Log.add('ERR', 'AI worker died', err.message);
+        reject(err);
+      };
+      const call = (op, arg, transfer = []) => new Promise((res, rej) => { const id = ++seq; const t = setTimeout(() => { pend.delete(id); const err = new Error('The AI worker stopped responding (' + op + ')'); rej(err); die(err); }, this.WT[op] || 60000); pend.set(id, { res, rej, t }); w.postMessage({ id, op, arg }, transfer); });
+      w.onmessage = ({ data }) => { if (data.progress != null) { this.setPill('busy', `Loading AI ${data.progress}%`); return; } const p = pend.get(data.id); if (!p) return; pend.delete(data.id); clearTimeout(p.t); data.ok ? p.res(data.r) : p.rej(new Error(data.err)); };
+      w.onerror = (e) => { e.preventDefault?.(); die(new Error(e.message || 'AI worker crashed')); };
       call('init', this.blob || null).then(() => resolve({ text: (t) => call('text', t), image: (b) => call('image', b, [b.buffer]) }), reject);
     });
   },
   toVec(res) { const e = res?.embeddings?.[0]; if (!e) throw new Error('No embedding'); const f = e.floatEmbedding; if (!f) throw new Error('Quantized output not supported'); return norm(Float32Array.from(f)); },
-  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'q2:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = norm(await this.emb.text('task: search result | query: ' + t)); this.textCache.set(t, v); DB.put('kv', 'q2:' + t, v.buffer.slice(0)); return v; },
+  async text(t) { t = t.trim(); if (this.textCache.has(t)) return this.textCache.get(t); const stored = await DB.get('kv', 'q2:' + t); if (stored) { const v = new Float32Array(stored); this.textCache.set(t, v); return v; } await this.load(); const v = norm(await this.emb.text('task: search result | query: ' + t)); this.textCache.set(t, v); DB.put('kv', 'q2:' + t, v.buffer.slice(0)).catch(() => {}); return v; }, // the cache write is best-effort: its failure must never fail the search
   async image(bytes) { await this.load(); const t0 = performance.now(); const v = norm(await this.emb.image(bytes)); const dt = performance.now() - t0; this.msPer = this.msPer ? this.msPer * .9 + dt * .1 : dt; return v; },
 };
 
@@ -1167,7 +1180,9 @@ const Indexer = {
       try {
         const tA = performance.now(); const vec = await AI.image(job.p.bytes); const rest = (performance.now() - tA) * this.REST[this.speed];
         const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, mtime: job.base.mtime || job.file?.lastModified || Date.now(), status: null, at: Date.now() };
-        await DB.saveItem(m, job.p.thumb, vec); L.add(m, vec); this.cur = job.base.id;
+        let saved = true;
+        try { await DB.saveItem(m, job.p.thumb, vec); } catch (e) { saved = false; this.skipped++; if (this.skipped <= 5) console.error('Save failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('Iris couldn\u2019t save these photos (' + e.message + '). Storage may be full. Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
+        if (saved) { L.add(m, vec); this.cur = job.base.id; }
         if (rest > 0) await sleep(Math.min(rest, 4000)); // let the GPU breathe so the phone stays smooth
       } catch (e) { this.skipped++; if (this.skipped <= 5) console.error('AI failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('The AI is failing on every photo (' + e.message + '). Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
       this.done++;
