@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.58';
+const VER = 'Iris 2.59';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -987,7 +987,9 @@ async function setStatus(ids, status) { const ms = []; for (const id of ids) { c
   // Persist FIRST, believe second: the in-memory status flips only after the durable write
   // lands, so a failed write (quota) never leaves the UI believing a move that didn't save.
   try { await DB.putMetas(ms.map((m) => ({ ...m, status }))); } catch (e) { Log.add('ERR', 'status change not saved', e.message); toast(`That change didn't save (${e.message}). Nothing was moved.`, 6000); return false; }
-  for (const m of ms) m.status = status; UI.binCount(); return true; }
+  for (const m of ms) m.status = status;
+  Junk.cache = null; // statuses changed, so the live set Junk scored has changed too — its count-keyed cache must not outlive a bin move or a restore (D-3)
+  UI.binCount(); return true; }
 
 /* ---------------- Native shell (Iris for Android) ----------------
    Inside the shell, Android gives Iris "All files access" once, for good. These handles act like the browser's
@@ -1107,11 +1109,14 @@ const Folders = {
     await DB.del('folders', f.id); L.folders.delete(f.id); UI.refreshAll(); toast(`Removed ${f.name} from Iris. Your files are untouched.`);
   },
   stats: { skippedTypes: {}, dirErrors: 0 },
-  async *walk(dir, path = []) {
+  async *walk(dir, path = [], skip = []) {
     try {
       for await (const [name, h] of dir.entries()) {
         if (name.startsWith('.')) continue;
-        if (h.kind === 'directory') { if (/^(cache|trash)$/i.test(name) || (NATIVE && dir.__native === Nat.root && name === 'Android')) continue; yield* this.walk(h, [...path, name]); }
+        if (h.kind === 'directory') { if (/^(cache|trash)$/i.test(name) || (NATIVE && dir.__native === Nat.root && name === 'Android')) continue;
+          let linked = false; for (const o of skip) { try { if (await h.isSameEntry(o)) { linked = true; break; } } catch {} }
+          if (linked) continue; // a subfolder that is itself a linked Iris folder is covered by its own check — descending here would index its photos twice (D-7)
+          yield* this.walk(h, [...path, name], skip); }
         else if (IMG_RE.test(name)) yield { h, path, name };
         else { const ext = (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || '?').toLowerCase(); this.stats.skippedTypes[ext] = (this.stats.skippedTypes[ext] || 0) + 1; }
       }
@@ -1154,7 +1159,8 @@ const Indexer = {
       Folders.stats = { skippedTypes: {}, dirErrors: 0 }; const tS = performance.now();
       const seen = new Set(); let ok = true, fresh = 0, adopted = 0;
       try {
-        for await (const e of Folders.walk(f.handle)) {
+        const others = [...L.folders.values()].filter((o) => o.id !== f.id).map((o) => o.handle); // the other linked folders: this walk must not descend into their subtrees (D-7)
+        for await (const e of Folders.walk(f.handle, [], others)) {
           if (this.removed.has(f.id)) { ok = false; break; } // the folder was removed mid-check: stop, queue nothing more
           const id = `${f.id}:${e.path.join('/')}/${e.name}`; seen.add(id); this.found++;
           if (!L.meta.has(id) && !this.queued.has(id)) {
@@ -1169,7 +1175,7 @@ const Indexer = {
       if (st.dirErrors) ok = false; // don’t forget photos from folders we couldn’t read
       if (ok && !this.removed.has(f.id)) { // forget photos that were deleted outside Iris (and never resurrect a removed folder)
         const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
-        if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); }
+        if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); Dups.groups = null; } // records died here: cached duplicate groups must not outlive them, whatever the AI does later (D-2)
         f.lastScan = Date.now(); f.count = this.found; await DB.put('folders', f.id, f);
       }
       if (!this.removed.has(f.id)) toast(adopted && !fresh ? `${f.name}: ${fmtN(adopted)} photos matched from the backup — nothing to reprocess.` : fresh ? `${f.name}: ${fmtN(fresh)} new photo${fresh === 1 ? '' : 's'} found.` : `${f.name}: checked ${fmtN(this.found)} photos, nothing new.`, 4000);
@@ -1187,7 +1193,7 @@ const Indexer = {
   async start() {
     if (this.running) { UI.renderIndex(); return; }
     if (!this.queue.length && !this.scanning) { UI.indexStatus(''); UI.refreshAll(); return; }
-    if (!(await ensureAI())) { UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
+    if (!(await ensureAI())) { Dups.groups = null; UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
     this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now(); Log.add('info', 'index start', this.queue.length, 'queued');
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
     Work.start('Understanding your photos');
@@ -1225,7 +1231,7 @@ let lastTouch = 0; for (const ev of ['pointerdown', 'pointermove', 'wheel', 'key
 document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && Indexer.running && !Indexer.wake) { try { Indexer.wake = await navigator.wakeLock?.request('screen'); } catch {} } });
 
 /* ---------------- Search ---------------- */
-const S = { text: '', img: null, pos: new Set(), neg: new Set(), refine: false, results: [], q: null, sort: 'rel' };
+const S = { text: '', img: null, pos: new Set(), neg: new Set(), refine: false, results: [], q: null, noPos: false, sort: 'rel' };
 function parseQuery(t) { const parts = (' ' + t).split(/\s-(?=\S)/); return { pos: parts[0].trim(), neg: parts.slice(1).map((s) => s.trim()).filter(Boolean) }; }
 async function queryVec(text, imgId) {
   const acc = new Float32Array(DIM); let any = false;
@@ -1244,13 +1250,16 @@ let searchSeq = 0;
 async function runSearch() {
   const seq = ++searchSeq; const text = $('#q').value.trim(); S.text = text;
   $('#qclear').classList.toggle('hide', !text && !S.img);
-  if (!text && !S.img) { S.q = null; return renderSearch(); }
+  if (!text && !S.img) { S.q = null; S.noPos = false; return renderSearch(); }
   if (!L.count) return renderSearch();
   if (AI.state !== 'ok' && !(text && AI.textCache.has(text))) { $('#sbar').textContent = AI.state === 'busy' ? 'Waiting for the AI to finish loading…' : ''; if (!(await ensureAI())) return; }
   if (!AI.textCache.has(text)) $('#sbar').textContent = 'Searching…';
   let q; try { q = await queryVec(text, S.img); } catch (e) { toast('Search failed: ' + e.message); return; }
-  if (seq !== searchSeq || !q) return;
-  q = rocchio(q, S.pos, S.neg); S.q = q;
+  if (seq !== searchSeq) return;
+  // Words that only exclude ("-people") compose no query at all: clear the previous search and say
+  // so, instead of leaving its results on screen under the new words (I-102).
+  if (!q) { S.q = null; S.results = []; S.noPos = !S.img && !parseQuery(text).pos; renderSearch(); return; }
+  q = rocchio(q, S.pos, S.neg); S.q = q; S.noPos = false;
   const ids = L.live(); const sc = scoreAll(q, ids); const st = stats(sc);
   let res = topK(ids, sc, 400).map((r) => ({ ...r, z: (r.s - st.mean) / st.sd }));
   // keep strong matches; always show at least 24
@@ -1272,6 +1281,7 @@ function renderSearch() {
   const res = $('#sres'), bar = $('#sbar'); res.innerHTML = ''; bar.innerHTML = '';
   if (!L.count) { res.append(emptyLib()); return; }
   if (!S.q) {
+    if (S.noPos) { bar.append(h('span', {}, 'Nothing to search for yet')); res.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🔍'), h('p', {}, 'That search only says what to leave out. Tell Iris what to look for as well — try “beach -people”.'))); return; }
     bar.append(h('span', {}, `${fmtN(L.live().length)} photos · newest first`));
     const ids = L.live().sort((a, b) => L.meta.get(b).mtime - L.meta.get(a).mtime); res.append(grid(ids)); return;
   }
@@ -1345,7 +1355,7 @@ const Dups = {
       .filter((g) => !this.dismissed.has(g.key) && !this.dismissed.has(g.key.slice(0, 300))).sort((a, b) => b.ids.length - a.ids.length);
     return this.groups;
   },
-  dismiss(g) { this.dismissed.add(g.key); localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-5000))); },
+  dismiss(g) { this.dismissed.add(g.key); try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-10000))); } catch {} } },
 };
 
 /* ---------------- Collections ---------------- */
@@ -1479,16 +1489,18 @@ const Pick = {
   preset(ids) { this.pre = ids; go('pick'); renderPickSrc(); $('#pSrc').value = 'pre'; toast(`${ids.length} photos ready. Tap “Pick the best”.`); },
   async run() {
     const src = $('#pSrc').value; let ids;
-    if (src === 'all') ids = L.live(); else if (src === 'pre') ids = this.pre || []; else if (src.startsWith('f:')) ids = L.live().filter((id) => L.meta.get(id).folder === src.slice(2)); else if (src.startsWith('c:')) ids = await collMembers(L.colls.get(src.slice(2)));
+    // 'pre' is a snapshot from an earlier moment: validate it against the library as it is NOW —
+    // a photo binned or deleted since must neither be picked nor crash the run (I-101)
+    if (src === 'all') ids = L.live(); else if (src === 'pre') ids = (this.pre || []).filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); else if (src.startsWith('f:')) ids = L.live().filter((id) => L.meta.get(id).folder === src.slice(2)); else if (src.startsWith('c:')) ids = await collMembers(L.colls.get(src.slice(2)));
     const from = $('#pFrom').value, to = $('#pTo').value;
-    if (from) { const t = new Date(from + '-01').getTime(); ids = ids.filter((id) => L.meta.get(id).mtime >= t); }
-    if (to) { const d = new Date(to + '-01'); d.setMonth(d.getMonth() + 1); ids = ids.filter((id) => L.meta.get(id).mtime < d.getTime()); }
+    if (from) { const t = new Date(from + '-01').getTime(); ids = ids.filter((id) => L.meta.get(id)?.mtime >= t); }
+    if (to) { const d = new Date(to + '-01'); d.setMonth(d.getMonth() + 1); ids = ids.filter((id) => L.meta.get(id)?.mtime < d.getTime()); }
     const jk = await Junk.compute().catch(() => null); if (jk) ids = ids.filter((id) => !jk.jset.has(id));
     if (!ids.length) return toast('No photos match those settings.');
     const K = +$('#pK').value, variety = +$('#pV').value / 100;
     let rel = null; const qt = $('#pQ').value.trim();
     if (qt) { if (!(await ensureAI())) return; const qv = await queryVec(qt); const sc = scoreAll(qv, ids); const st = stats(sc); rel = Array.from(sc, (s) => 1 / (1 + Math.exp(-(s - st.mean) / st.sd * 1.5))); }
-    const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp));
+    const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id)?.sharp || 0));
     let base = ids.map((id, i) => { const q = Dups.quality(L.meta.get(id), maxSharp); return rel ? .55 * rel[i] + .45 * q : q; });
     let cand = ids.map((id, i) => ({ id, b: base[i] })); if (cand.length > 4000) { cand.sort((a, b) => b.b - a.b); cand = cand.slice(0, 4000); }
     const maxSim = new Float32Array(cand.length).fill(0); const chosen = []; const used = new Uint8Array(cand.length); const M = L.mat;
@@ -1505,7 +1517,7 @@ const Pick = {
 };
 function renderPickSrc() {
   const s = $('#pSrc'), cur = s.value; s.innerHTML = '';
-  if (Pick.pre) s.append(h('option', { value: 'pre' }, `Selected photos (${Pick.pre.length})`));
+  if (Pick.pre) { const okN = Pick.pre.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }).length; s.append(h('option', { value: 'pre' }, `Selected photos (${okN})`)); }
   s.append(h('option', { value: 'all' }, `All photos (${fmtN(L.live().length)})`));
   for (const c of L.colls.values()) s.append(h('option', { value: 'c:' + c.id }, 'Collection: ' + c.name));
   for (const f of L.folders.values()) s.append(h('option', { value: 'f:' + f.id }, 'Folder: ' + f.name));
@@ -1703,7 +1715,10 @@ async function renderClean() {
   if (!L.count) { body.append(emptyLib()); return; }
   if (cTab === 'dup') {
     if (!Dups.groups) { body.append(h('p', { class: 'sub' }, 'Looking for duplicates…')); await sleep(30); await Dups.find(); if (tok !== RT_.clean) return; body.innerHTML = ''; }
-    const groups = Dups.groups.map((g) => ({ ...g, ids: g.ids.filter((id) => L.meta.get(id)?.status !== 'trash') })).filter((g) => g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
+    // The view works on copies: ids with no record, or sitting in the bin, drop out (D-2). If the ★ best
+    // is one of them, the best LIVE copy takes its place at the head of the copy — star, marks and counts
+    // follow it — while the stored group is never rewritten (D-4/I-103).
+    const groups = Dups.groups.map((g) => { const ids = g.ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); if (ids.length < 2) return null; let best = g.best; if (!ids.includes(best)) { let bs = -Infinity, nb = null; const mx = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp)); for (const id of ids) { const q = Dups.quality(L.meta.get(id), mx); if (q > bs) { bs = q; nb = id; } } best = nb || ids[0]; ids.splice(ids.indexOf(best), 1); ids.unshift(best); } return { ...g, ids, best }; }).filter((g) => g && g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
     body.append(h('div', { class: 'card', style: 'margin-bottom:14px' },
       h('div', { class: 'rowf', style: 'align-items:flex-end' }, h('div', {}, h('div', { class: 'cnt' }, fmtN(groups.length), h('span', { class: 'small' }, ' groups')), h('p', {}, `${fmtN(total)} extra copies` + (bytes ? ` · ${fmtMB(bytes)} to free` : ''))),
         h('div', { class: 'field', style: 'margin:0' }, h('label', {}, 'Match closeness: ', h('b', {}, Math.round(Dups.thr * 100) + '%')), h('input', { type: 'range', min: '86', max: '99', value: String(Math.round(Dups.thr * 100)), onchange: (e) => { Dups.thr = e.target.value / 100; Dups.groups = null; renderClean(); } }))),
