@@ -1,10 +1,21 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v74';
+const VERSION = 'iris-v75';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // Cache the shell entry by entry (P-4): addAll was all-or-nothing, so ONE missing file in a
+  // deploy (a skipped icon, a renamed manifest) made the installing worker redundant and every
+  // future update failed the same silent way forever. Now a failed entry is collected, the rest
+  // still cache, the worker still activates — and the page is told what is missing, so the fact
+  // reaches Diagnostics instead of stranding the app on an old version without a word.
+  e.waitUntil((async () => {
+    const c = await caches.open(VERSION);
+    const failed = [];
+    await Promise.all(SHELL.map(async (u) => { try { await c.add(u); } catch { failed.push(u); } }));
+    if (failed.length) { const cs = await self.clients.matchAll(); for (const cl of cs) cl.postMessage({ type: 'sw-shell-missing', version: VERSION, failed }); }
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (e) => {

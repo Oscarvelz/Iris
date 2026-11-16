@@ -491,11 +491,15 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.59';
+const VER = 'Iris 2.60';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
-    const t = ((Date.now() - this.t0) / 1000).toFixed(1).padStart(7); this.lines.push(`${t}s ${lv} ${msg}`); if (this.lines.length > 400) this.lines.splice(0, 100); },
+    const t = ((Date.now() - this.t0) / 1000).toFixed(1).padStart(7); this.lines.push(`${t}s ${lv} ${msg}`); if (this.lines.length > 400) this.lines.splice(0, 100); this.persist(); },
+  // The log is the only witness when the page dies (P-6): its tail is kept in localStorage as
+  // lines are added — bounded (the newest 120 lines) and cheap — and restored at the next
+  // launch, so a crash or an OOM kill still leaves a trace Copy report can carry.
+  persist() { try { localStorage.setItem('iris-log', JSON.stringify({ at: new Date().toISOString(), lines: this.lines.slice(-120) })); } catch {} },
   async report() {
     let est = {}; try { est = await navigator.storage.estimate(); } catch {}
     let gpu = 'none'; try { const a = await navigator.gpu?.requestAdapter(); gpu = a ? 'yes ' + (a.info?.vendor || '') + ' ' + (a.info?.architecture || '') : 'no adapter'; } catch (e) { gpu = 'err ' + e.message; }
@@ -509,6 +513,9 @@ for (const lv of ['error', 'warn']) { const o = console[lv].bind(console); conso
 let lastCrashToast = 0;
 addEventListener('error', (e) => { Log.add('ERR', 'uncaught', e.message, (e.filename || '').split('/').pop() + ':' + e.lineno); });
 addEventListener('unhandledrejection', (e) => { Log.add('ERR', 'unhandled', e.reason); if (Date.now() - lastCrashToast > 8000) { lastCrashToast = Date.now(); toast('Something went wrong: ' + (e.reason?.message || e.reason) + '. Library → Diagnostics has details.', 6000); } });
+/* P-6 restore: whatever the previous session logged before it ended — cleanly or by dying —
+   comes back at the head of this session's log, under a marker that says it is not this launch. */
+try { const prevLog = JSON.parse(localStorage.getItem('iris-log') || 'null'); if (prevLog && Array.isArray(prevLog.lines) && prevLog.lines.length) Log.lines.push('——— previous session' + (prevLog.at ? ' · ' + prevLog.at : '') + ' ———', ...prevLog.lines); } catch {}
 
 /* ---------------- IndexedDB ---------------- */
 const DB = {
@@ -540,8 +547,15 @@ const DB = {
    window.__irisSaved. Shells older than this web version simply don't have saveStart, so
    this returns 'unavailable' and the export falls through to the browser paths below. */
 const NativeSave = {
-  pending: null,
-  async save(file) {
+  seq: 0, current: null, stale: 0, chain: Promise.resolve(), timeout: 120000,
+  // Saves are SERIALIZED (P-8): the shell reports back through ONE callback with no token in
+  // it, so two saves in flight at once could never be told apart — the old single `pending`
+  // slot let the second save overwrite the first, and a callback could settle the wrong save
+  // (or none: no timeout meant a lost callback hung the export forever). Now each save queues
+  // behind the previous one, registers itself as the only save a callback can settle, and
+  // answers 'timeout' if the shell never calls back.
+  save(file) { const run = this.chain.then(() => this._save(file)); this.chain = run.catch(() => {}); return run; },
+  async _save(file) {
     const B = window.IrisNative; if (!B?.saveStart) return 'unavailable';
     const CH = 192 * 1024;
     try {
@@ -553,12 +567,16 @@ const NativeSave = {
         if (!JSON.parse(B.saveChunk(btoa(bin)))) { try { B.saveAbort(); } catch {} return 'unavailable'; }
       }
     } catch (e) { try { B.saveAbort(); } catch {} return 'unavailable'; }
-    const done = new Promise((res) => { NativeSave.pending = res; });
-    try { B.saveFinish(); } catch (e) { NativeSave.pending = null; return 'unavailable'; }
-    const r = await done; NativeSave.pending = null; return r === 'saved' ? 'saved' : 'cancel';
+    const id = ++this.seq;
+    const done = new Promise((res) => {
+      const timer = setTimeout(() => { if (this.current && this.current.id === id) { this.current = null; this.stale++; res('timeout'); } }, this.timeout);
+      this.current = { id, settle: (r) => { clearTimeout(timer); res(r); } };
+    });
+    try { B.saveFinish(); } catch (e) { if (this.current && this.current.id === id) this.current = null; return 'unavailable'; }
+    const r = await done; return r === 'saved' ? 'saved' : r === 'timeout' ? 'timeout' : 'cancel';
   },
 };
-window.__irisSaved = (r) => { if (NativeSave.pending) NativeSave.pending(r); };
+window.__irisSaved = (r) => { const c = NativeSave.current; if (!c) { if (NativeSave.stale > 0) NativeSave.stale--; return; } NativeSave.current = null; c.settle(r); };
 /* Background work (2.33, at Oscar's ask): while the indexer understands photos, the shell's work
    service keeps Iris alive — a progress notification and a wake lock — so a long folder check can
    finish with the screen off or another app in front. bg=true is also what lets the indexer loop
@@ -590,6 +608,7 @@ const Backup = {
       const r = await NativeSave.save(file);
       if (r === 'saved') { toast(`Backup saved as ${name}, in the place you chose — keep it somewhere safe.`, 5000); return; }
       if (r === 'cancel') return;
+      if (r === 'timeout') { toast('The save did not answer in time. Check whether the backup file was saved before trying again.', 6000); return; }
       toast('This app shell is too old to save backups — update the shell, then try again.', 5000); return;
     }
     // In a browser: the system save dialog first, where offered; share next, and the plain
@@ -1475,12 +1494,12 @@ async function renderColl() {
     cards.append(h('div', { class: 'card click', onclick: () => Modal.open(h('div', {}, h('h2', {}, ic + ' ' + name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos · ${pct}% of your library`), grid(ids, { path: true })), true) }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos · ${pct}% of your library`), mini));
   }
 }
-async function openColl(c) {
+async function openColl(c, refresh) {
   const ids = await collMembers(c);
-  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { c.z = +e.target.value; await DB.put('colls', c.id, c); openColl(c); } })) : '';
-  Modal.open(h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
-    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
-    grid(ids, { path: true })), true);
+  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { c.z = +e.target.value; await DB.put('colls', c.id, c); openColl(c, true); } })) : '';
+  const sheet = h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
+    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
+    grid(ids, { path: true })); if (refresh) Modal.replace(sheet, true); else Modal.open(sheet, true);
 }
 $('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); else { toast('Iris couldn’t search for that — the AI may not be loaded. Nothing was saved.', 4500); go('coll'); } };
 
@@ -1531,10 +1550,10 @@ $('#pGo').onclick = () => { if (!L.count) return toast('Add some photos first.')
 async function shareIds(ids) {
   if (NATIVE) { const ps = ids.slice(0, 100).map((id) => { const m = L.meta.get(id), f = L.folders.get(m?.folder); return f?.handle?.__native ? [f.handle.__native, ...m.path, m.name].join('/') : null; }).filter(Boolean); if (!ps.length) return toast('Nothing to share.'); window.IrisNative.share(JSON.stringify(ps)); if (ps.length < ids.length) toast(`Shared ${ps.length} of ${ids.length} — file-picked photos can’t be shared from the app.`, 4000); return; }
   if (!navigator.share) return toast('Sharing is not supported in this browser.');
-  ids = ids.slice(0, 60); const files = [];
+  const total = ids.length; ids = ids.slice(0, 60); const files = [];
   for (const id of ids) { const f = await Folders.fileFor(id, true); if (f) files.push(f); }
   if (!files.length) return toast('Could not open the original files. Reconnect the folder in Library.');
-  try { if (navigator.canShare && !navigator.canShare({ files })) return toast('These files can’t be shared from here.'); await navigator.share({ files }); } catch (e) { if (e.name !== 'AbortError') toast('Share failed: ' + e.message); }
+  try { if (navigator.canShare && !navigator.canShare({ files })) return toast('These files can’t be shared from here.'); await navigator.share({ files }); if (files.length < total) toast(`Shared ${files.length} of ${total} — this browser shares at most 60 photos at a time.`, 4000); } catch (e) { if (e.name !== 'AbortError') toast('Share failed: ' + e.message); }
 }
 async function deleteFromDevice(ids) {
   const byF = new Map(); const local = [];
@@ -1612,7 +1631,7 @@ $('#vPic').addEventListener('touchend', (e) => { const g = Zoom.g; if (!g) retur
   if (Zoom.s > 1) { Zoom.clamp(); Zoom.apply(true); return; }
   const dx = c.clientX - g.sx, dy = c.clientY - g.sy; if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.3) Viewer.step(dx < 0 ? 1 : -1); });
 $('#vPic').addEventListener('touchcancel', () => { Zoom.g = null; if (Zoom.s > 1) { Zoom.clamp(); Zoom.apply(true); } });
-document.addEventListener('keydown', (e) => { if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
+document.addEventListener('keydown', (e) => { if ($('#modal').classList.contains('on')) { if (e.key === 'Escape') Modal.close(true); return; } if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
 
 /* ---------------- Compare (Clean · duplicate groups) ----------------
    Press-and-hold a photo in a duplicate group: the whole group opens big, one photo at a time in a
@@ -1679,12 +1698,12 @@ const Compare = {
 window.IrisBack = () => { try { return Back.handler(); } catch (e) { return false; } };
 const Back = {
   push() { history.pushState({ iris: 1 }, ''); },
-  handler() { if ($('#viewer').classList.contains('on')) { Viewer.close(true); return true; } if (Sel.on) { endSel(); return true; } if ($('#modal').classList.contains('on')) { Modal.close(true); return true; } const prev = NavStack.pop(); if (prev) { show(prev); return true; } if (cur !== 'search') { show('search'); return true; } return false; },
+  handler() { if ($('#modal').classList.contains('on')) { Modal.close(true); return true; } if ($('#viewer').classList.contains('on')) { Viewer.close(true); return true; } if (Sel.on) { endSel(); return true; } const prev = NavStack.pop(); if (prev) { show(prev); return true; } if (cur !== 'search') { show('search'); return true; } return false; },
 };
 history.replaceState({ iris: 0 }, ''); history.pushState({ iris: 1 }, '');
 addEventListener('popstate', () => { if (Back.handler()) history.pushState({ iris: 1 }, ''); });
 /* ---------------- Modal ---------------- */
-const Modal = { _cancel: null, open(content, wide, onCancel) { this._cancel = onCancel || null; const b = $('#mBody'); b.innerHTML = ''; b.style.width = wide ? 'min(1100px,100%)' : ''; b.append(content); $('#modal').classList.add('on'); if (Sel.on) updSel(); }, close(cancel) { const c = this._cancel; this._cancel = null; $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); if (cancel && c) c(); } };
+const Modal = { _stack: [], get _cancel() { const f = this._stack[this._stack.length - 1]; return f ? f.onCancel : null; }, _show(f) { const b = $('#mBody'); b.innerHTML = ''; b.style.width = f.wide ? 'min(1100px,100%)' : ''; b.append(f.content); $('#modal').classList.add('on'); }, open(content, wide, onCancel) { const f = { content, wide: !!wide, onCancel: onCancel || null }; this._stack.push(f); this._show(f); if (Sel.on) updSel(); }, replace(content, wide, onCancel) { if (!this._stack.length) return this.open(content, wide, onCancel); const f = this._stack[this._stack.length - 1]; f.content = content; f.wide = !!wide; f.onCancel = onCancel || null; this._show(f); if (Sel.on) updSel(); }, close(cancel) { const f = this._stack.pop(); if (!f) { $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); return; } if (this._stack.length) { this._show(this._stack[this._stack.length - 1]); if (cancel && f.onCancel) f.onCancel(); return; } $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); if (cancel && f.onCancel) f.onCancel(); } };
 $('#mScrim').onclick = () => Modal.close(true);
 function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { Modal.close(v ? undefined : true); res(v); };
   Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))), false, () => res(null));
@@ -1916,6 +1935,20 @@ $('#obFile').onclick = () => { $('#fModel').click(); };
 $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); };
 
 /* ---------------- Boot ---------------- */
+/* If the index database refuses to open (P-5) — a version refusal, a blocked or corrupted
+   store — boot must not die into a zombie shell whose only advice points at a Library behind
+   the same dead boot. Say what happened and offer the two honest exits: try again, or erase
+   the index (the recovery the Library's own Erase performs) and let Iris rebuild it. */
+function bootRecovery(e) {
+  Log.add('ERR', 'boot stopped: the index would not open', e);
+  let gone = false; const reload = () => { if (!gone) { gone = true; location.reload(); } };
+  const erase = () => { try { const r = indexedDB.deleteDatabase('iris'); r.onsuccess = reload; r.onerror = reload; r.onblocked = reload; } catch { reload(); } setTimeout(reload, 3000); };
+  const ov = h('div', { class: 'ov on' }, h('div', { class: 'scrim' }), h('div', { class: 'sheet' },
+    h('h2', {}, 'Iris can’t open its index'),
+    h('p', { class: 'sub' }, 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
+    h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: reload }, 'Try again'), h('button', { class: 'btn danger', onclick: erase }, 'Erase index and reload'))));
+  ov.id = 'bootFail'; document.body.append(ov);
+}
 (async function boot() {
   applyTheme(themeNow(), false);
   if ('serviceWorker' in navigator) {
@@ -1933,14 +1966,19 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
       try { if (sessionStorage.getItem('iris-sw-reload') === VER) return; sessionStorage.setItem('iris-sw-reload', VER); } catch {}
       swReloaded = true; location.reload();
     });
+    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); });
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+      // P-4, page side: an installing worker that ends redundant with no active worker means an
+      // update died on the doorstep — that fact belongs in the log, not in silence.
+      const watchW = (w) => { if (w) w.addEventListener('statechange', () => { if (w.state === 'redundant' && !reg.active) Log.add('ERR', 'a service worker update failed to install; Iris keeps running the version already on this device'); }); };
+      reg.addEventListener('updatefound', () => watchW(reg.installing)); watchW(reg.installing);
       reg.update().catch(() => {});
       addEventListener('irisnative-resume', () => reg.update().catch(() => {}));
       document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
     }).catch(() => {});
   }
   caches.delete('iris-model').catch(() => {});
-  await DB.open();
+  try { await DB.open(); } catch (e) { bootRecovery(e); return; }
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
   for (const [id, buf] of vecs) { const m = metas.get(id); if (m) L.add(m, new Float32Array(buf)); }
   for (const [id, f] of await DB.all('folders')) { if (f.handle?.__native) Object.setPrototypeOf(f.handle, NDir.prototype); L.folders.set(id, f); }
