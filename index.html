@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.75';
+const VER = 'Iris 2.76';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1535,13 +1535,13 @@ if (NATIVE) {
   // one sheet, shown only until Android's "All files access" switch is on; it never comes back after that
   Nat.ask = () => { if (Nat.has() || $('#modal').classList.contains('on') && Nat._asking) return;
     Nat._asking = true; Modal.open(h('div', {}, h('h2', {}, '🔓 One switch, once'), h('p', { class: 'sub' }, 'Turn on “Allow access to manage all files” for Iris. Android remembers it for good: no more Allow pop-ups, any folder, and deleting from the bin just works.'),
-      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Nat._asking = false; Modal.close(); } }, 'Later'), h('button', { class: 'btn pri', onclick: () => window.IrisNative.askAccess() }, 'Open the switch'))), false, () => { Nat._asking = false; }); };
-  addEventListener('irisnative-resume', () => { if (Nat._asking && Nat.has()) { Nat._asking = false; Modal.close(); toast('Done. Iris can reach your photos for good.', 3500); if (typeof renderLib === 'function' && cur === 'lib') renderLib(); } });
+      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Nat._asking = false; Modal.close(true); } }, 'Later'), h('button', { class: 'btn pri', onclick: () => window.IrisNative.askAccess() }, 'Open the switch'))), false, () => { Nat._asking = false; }); };
+  addEventListener('irisnative-resume', () => { if (Nat._asking && Nat.has()) { Nat._asking = false; Modal.close(true); toast('Done. Iris can reach your photos for good.', 3500); if (typeof renderLib === 'function' && cur === 'lib') renderLib(); } });
   // the shell's own folder picker: any folder, including all of the phone's storage at once
   window.showDirectoryPicker = () => new Promise((res, rej) => {
     if (!Nat.has()) { Nat.ask(); return rej(new DOMException('Turn on the switch first, then tap again.', 'AbortError')); }
     const ROOT = Nat.root; let at = ROOT, done = false; const box = h('div', {});
-    const end = (v) => { if (done) return; done = true; Modal.close(); v ? res(v) : rej(new DOMException('cancelled', 'AbortError')); };
+    const end = (v) => { if (done) return; done = true; Modal.close(true); v ? res(v) : rej(new DOMException('cancelled', 'AbortError')); };
     const label = (p) => p === ROOT ? 'Phone storage' : p.split('/').pop();
     const draw = () => { let list = []; try { list = Nat.call('list', at).filter((e) => e.d && !e.n.startsWith('.') && !(at === ROOT && e.n === 'Android')).sort((a, b) => a.n.localeCompare(b.n)); } catch {}
       const row = (txt, fn, right = '›') => h('div', { class: 'kv', style: 'padding:11px 2px;cursor:pointer', onclick: fn }, h('span', {}, txt), h('span', { class: 'small' }, right));
@@ -1561,8 +1561,12 @@ const Folders = {
     let r = '?'; try { r = await f.handle.requestPermission({ mode }); if (r === 'granted') { Log.add('info', 'perm', f.name, mode, 'query', q, '→ granted'); return true; } } catch (e) { r = 'err ' + e.message; }
     Log.add('info', 'perm', f.name, mode, 'query', q, 'request', r, '→ reconnect dialog');
     // Android Chrome often can't re-open a saved folder: ask the user to pick it again (one tap).
+    // The sheet's finish resolves BEFORE its close, and closes with cancel (R6-I2's
+    // class): its onCancel resolves with the cancel value, so the caller's answer must
+    // land first — and a folder-access sheet has no business ending a travelling
+    // selection on its completion close. reconnectAll's finish follows the same shape.
     return new Promise((res) => {
-      const finish = (v) => { Modal.close(); res(v); };
+      const finish = (v) => { res(v); Modal.close(true); };
       Modal.open(h('div', {}, h('h2', {}, '📁 Reconnect ' + f.name),
         h('p', { class: 'sub' }, `Your browser forgets folder access when Iris closes. Tap Open, then “Use this folder” on ${f.name}` + (mode === 'readwrite' ? ', and Allow editing so Iris can delete.' : '.')),
         h('p', { class: 'small' }, 'If Allow won’t respond, close floating apps (fooView, screen filters, chat bubbles) first.'),
@@ -1584,7 +1588,7 @@ const Folders = {
   reconnectAll(need) {
     return new Promise((res) => {
       const ok = new Set(); let settled = false;
-      const finish = () => { if (settled) return; settled = true; Modal.close(); res(ok); };
+      const finish = () => { if (settled) return; settled = true; res(ok); Modal.close(true); };
       const skipBtn = h('button', { class: 'btn', onclick: finish }, 'Skip');
       const mark = (f, b) => { ok.add(f); b.textContent = '✓'; b.disabled = true; };
       const sync = () => { const left = need.length - ok.size; skipBtn.textContent = ok.size ? `Start without ${left}` : 'Skip'; allBtn.classList.toggle('hide', left === 0);
@@ -1619,12 +1623,14 @@ const Folders = {
     this.basket();
   },
   // Android lets a page pick one folder at a time (and never the storage root), so Iris collects several picks
-  // in a basket and reads them all in one go.
+  // in a basket and reads them all in one go. Its closes (like the Nat sheet's and the
+  // directory picker's above) use the cancel form (R6-I2's class): collecting folders
+  // is not the selection's business, so finishing or leaving the basket preserves one.
   basket() {
-    const p = this.pending || []; if (!p.length) { Modal.close(); return; }
+    const p = this.pending || []; if (!p.length) { Modal.close(true); return; }
     const chips = h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px' }, ...p.map((f) => h('span', { class: 'chip', style: 'white-space:nowrap' }, '📁 ' + f.name, h('button', { style: 'background:none;border:0;color:inherit;font-size:16px;padding:0 0 0 8px;cursor:pointer', 'aria-label': 'Remove ' + f.name, onclick: async () => { this.pending = p.filter((x) => x !== f); if (!f.lastScan && !L.ids.some((id) => L.meta.get(id)?.folder === f.id)) { await DB.del('folders', f.id); L.folders.delete(f.id); UI.renderLib(); } this.basket(); } }, '×'))));
     Modal.open(h('div', {}, h('h2', {}, p.length === 1 ? '1 folder selected' : p.length + ' folders selected'), h('p', { class: 'sub' }, 'Add every folder you want, then read them all at once. Android opens one folder per pick.'), chips,
-      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(); this.add(); } }, '+ Add another folder'), h('button', { class: 'btn pri', onclick: () => { Modal.close(); const q = this.pending; this.pending = []; Indexer.scan(q); } }, p.length === 1 ? 'Read this folder' : 'Read all ' + p.length))));
+      h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(true); this.add(); } }, '+ Add another folder'), h('button', { class: 'btn pri', onclick: () => { Modal.close(true); const q = this.pending; this.pending = []; Indexer.scan(q); } }, p.length === 1 ? 'Read this folder' : 'Read all ' + p.length))));
   },
   async remove(f) {
     Indexer.removed.add(f.id); if (Indexer.later) Indexer.later = Indexer.later.filter((x) => x !== f); // a check in flight must not resurrect it
@@ -2039,9 +2045,15 @@ async function addToColl(ids) {
   // user-paced time after any caller-side check, and a record dying in between was
   // persisted as a ghost member under a false "Added N". The tap adds only what
   // still exists, and the toast counts exactly that.
+  // The sheet's closes, by case (R6-S1): the set-tap's SUCCESSFUL add keeps the
+  // declared completion close (a completed selection action ends selection mode —
+  // the round-5 contract); the nothing-left abort and the "+ New collection"
+  // transition close with cancel, because nothing has completed there — abandoning
+  // the name prompt that follows the transition must leave the selection standing,
+  // exactly as cancelling this sheet itself would.
   const sets = [...L.colls.values()].filter((c) => c.type === 'set');
-  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { const live = ids.filter((id) => L.meta.has(id)); if (!live.length) { Modal.close(); toast('Those photos are no longer in Iris — nothing was added.'); return; } const nc = { ...c, ids: [...new Set([...c.ids, ...live])] }; try { await DB.put('colls', c.id, nc); } catch (e) { toast('Couldn’t save that change — storage may be full. The collection was not changed.', 4500); throw e; } c.ids = nc.ids; Modal.close(); toast(`Added ${live.length} to ${c.name}`); } }, '★ ' + c.name)),
-    h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(); saveCollDialog(ids); } }, '+ New collection')));
+  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { const live = ids.filter((id) => L.meta.has(id)); if (!live.length) { Modal.close(true); toast('Those photos are no longer in Iris — nothing was added.'); return; } const nc = { ...c, ids: [...new Set([...c.ids, ...live])] }; try { await DB.put('colls', c.id, nc); } catch (e) { toast('Couldn’t save that change — storage may be full. The collection was not changed.', 4500); throw e; } c.ids = nc.ids; Modal.close(); toast(`Added ${live.length} to ${c.name}`); } }, '★ ' + c.name)),
+    h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(true); saveCollDialog(ids); } }, '+ New collection')));
 }
 const SUGG_DECOY = ['a portrait photo of a person', 'a product photo of an object on a white background', 'a document, card or text on paper', 'a screenshot of a phone screen', 'a wristwatch or jewelry', 'an empty room with no people in it', 'a close-up of a hand', 'a plain wall or floor with nothing on it'];
 /* Suggested categories (2.31): a wide catalog, not a fixed top-10. Every photo Iris has
@@ -2173,16 +2185,26 @@ async function openColl(c, refresh) {
   // returns to what is actually saved. Their writes also stand under the durable-
   // generation fence (R6-D10's class): a stale tab's edit never lands in a cleared
   // store. Delete below already had the honest order — it deletes first.
+  // The sheet's own closes preserve a travelling selection (R6-I4): '✦ Best of these'
+  // and the Delete completion close with cancel — their business is this collection,
+  // not the selection. (The selbar's own best action ends the selection explicitly,
+  // in its handler, because ending it is that action's business; these buttons never
+  // declared it, and no longer do it as a side effect of how they close.)
   const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { const z = +e.target.value; if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); openColl(c, true); return; } try { await DB.put('colls', c.id, { ...c, z }); } catch (err) { Log.add('ERR', 'collection strictness not saved', err.message); toast(`That change didn't save (${err.message}). Nothing was changed.`, 6000); openColl(c, true); return; } c.z = z; openColl(c, true); } })) : '';
   const sheet = h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
-    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That rename was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { await DB.put('colls', c.id, { ...c, name: nn }); } catch (err) { Log.add('ERR', 'collection rename not saved', err.message); toast(`That rename didn't save (${err.message}). The collection keeps its old name.`, 6000); return; } c.name = nn; openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
+    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(true); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That rename was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { await DB.put('colls', c.id, { ...c, name: nn }); } catch (err) { Log.add('ERR', 'collection rename not saved', err.message); toast(`That rename didn't save (${err.message}). The collection keeps its old name.`, 6000); return; } c.name = nn; openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(true); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
     grid(ids, { path: true })); if (refresh) Modal.replace(sheet, true); else Modal.open(sheet, true);
 }
 $('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); else { toast('Iris couldn’t search for that — the AI may not be loaded. Nothing was saved.', 4500); go('coll'); } };
 
 /* ---------------- Best-of picker ---------------- */
 const Pick = {
-  preset(ids) { this.pre = ids; go('pick'); renderPickSrc(); $('#pSrc').value = 'pre'; toast(`${ids.length} photos ready. Tap “Pick the best”.`); },
+  // The toast counts the living at the tap, with renderPickSrc's own test (R6-I5):
+  // a caller's list can be minutes old (openColl computes it at sheet open), and
+  // announcing its stale length contradicted the dropdown this same tap renders —
+  // "5 photos ready" over "Selected photos (3)". Pick.run revalidates the snapshot
+  // regardless; now the announcement tells the same truth.
+  preset(ids) { this.pre = ids; go('pick'); renderPickSrc(); $('#pSrc').value = 'pre'; const n = ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }).length; toast(n === ids.length ? `${n} photos ready. Tap “Pick the best”.` : `${n} of ${ids.length} photos ready — the rest are gone or in the bin. Tap “Pick the best”.`); },
   async run() {
     const src = $('#pSrc').value; let ids;
     // 'pre' is a snapshot from an earlier moment: validate it against the library as it is NOW —
@@ -2485,10 +2507,18 @@ addEventListener('popstate', () => { if (Back.handler()) history.pushState({ iri
 /* ---------------- Modal ---------------- */
 const Modal = { _stack: [], get _cancel() { const f = this._stack[this._stack.length - 1]; return f ? f.onCancel : null; }, _show(f) { const b = $('#mBody'); b.innerHTML = ''; b.style.width = f.wide ? 'min(1100px,100%)' : ''; b.append(f.content); $('#modal').classList.add('on'); }, open(content, wide, onCancel) { const f = { content, wide: !!wide, onCancel: onCancel || null }; this._stack.push(f); this._show(f); if (Sel.on) updSel(); }, replace(content, wide, onCancel) { if (!this._stack.length) return this.open(content, wide, onCancel); const f = this._stack[this._stack.length - 1]; f.content = content; f.wide = !!wide; f.onCancel = onCancel || null; this._show(f); if (Sel.on) updSel(); }, close(cancel) { const f = this._stack.pop(); if (!f) { $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); return; } if (this._stack.length) { this._show(this._stack[this._stack.length - 1]); if (cancel && f.onCancel) f.onCancel(); return; } $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); if (cancel && f.onCancel) f.onCancel(); } };
 $('#mScrim').onclick = () => Modal.close(true);
-function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { Modal.close(v ? undefined : true); res(v); };
+// The prompt/confirm helpers resolve BEFORE they close, and close with cancel (R6-I2):
+// the affirmative path used to close without cancel, so popping the last frame fired
+// Modal.close's endSel — answering a sole-frame prompt or confirm with its primary
+// button silently destroyed a travelling selection, while Cancel, Escape, the scrim
+// and Back (all cancel closes) preserved it. The helpers' business is the answer, not
+// the selection, so both paths now close the same preserving way. Resolving first is
+// what makes it safe: the frame's onCancel resolves the promise with the cancel value,
+// and once the caller's value has landed that second resolution is a no-op.
+function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { res(v); Modal.close(true); };
   Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))), false, () => res(null));
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); }); setTimeout(() => inp.focus(), 80); }); }
-function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { Modal.close(v ? undefined : true); res(v); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => res(false)); }); }
+function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { res(v); Modal.close(true); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => res(false)); }); }
 
 /* ---------------- Selection bar ---------------- */
 $('#selbar').addEventListener('click', async (e) => {
@@ -2523,7 +2553,13 @@ async function renderClean() {
     // The view works on copies: ids with no record, or sitting in the bin, drop out (D-2). If the ★ best
     // is one of them, the best LIVE copy takes its place at the head of the copy — star, marks and counts
     // follow it — while the stored group is never rewritten (D-4/I-103).
-    const groups = Dups.groups.map((g) => { const ids = g.ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); if (ids.length < 2) return null; let best = g.best; if (!ids.includes(best)) { let bs = -Infinity, nb = null; const mx = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp)); for (const id of ids) { const q = Dups.quality(L.meta.get(id), mx); if (q > bs) { bs = q; nb = id; } } best = nb || ids[0]; ids.splice(ids.indexOf(best), 1); ids.unshift(best); } return { ...g, ids, best }; }).filter((g) => g && g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
+    // The render honours the dismissals too, with find()'s own test (R6-I1): the filter used to
+    // live only inside find(), so a dismissed group stayed in the standing store and any later
+    // render that did not re-run find() — plain navigation back to Clean, the segment toggle, a
+    // completion's own re-render — showed it again, breaking the "won't show this group again"
+    // promise its Keep-all toast and the Library both make. The consumer now applies the same
+    // key test as the producer, so a dismissal holds on every render, not only after a re-find.
+    const groups = Dups.groups.map((g) => { const ids = g.ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); if (ids.length < 2) return null; let best = g.best; if (!ids.includes(best)) { let bs = -Infinity, nb = null; const mx = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp)); for (const id of ids) { const q = Dups.quality(L.meta.get(id), mx); if (q > bs) { bs = q; nb = id; } } best = nb || ids[0]; ids.splice(ids.indexOf(best), 1); ids.unshift(best); } return { ...g, ids, best }; }).filter((g) => g && g.ids.length > 1 && g.ids[0] === g.best && !Dups.dismissed.has(g.key) && !Dups.dismissed.has(g.key.slice(0, 300))); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
     // The bulk actions below announce the operation's outcome, never a render-time
     // snapshot (R5-I3): setStatus silently filters the dead, so a count captured at
     // render — or before the confirm dialog's own await — parts from the deed
@@ -2579,22 +2615,32 @@ async function confirmDelete(ids) {
     (p ? `⚠ ${fmtN(p)} of them ${p === 1 ? "is" : "are"} in your NO DELETE folder. ` : '') + 'They’re removed from your phone for good, not moved to another bin. ' + (NATIVE ? '' : 'If your browser asks to let Iris edit the folder, choose Allow.'), 'Delete for good', true);
 }
 function renderBin() {
+  // The header count, the grid and Restore all work from this render's list; Delete all
+  // does not (R6-I6): the confirmation is the last surface read before the one
+  // irreversible act in the app, so its button recomputes the living bin at the tap
+  // and hands THAT list to confirmDelete and deleteFromDevice — never the render-time
+  // closure, which a background folder check can stale while the Bin stands open.
+  // (Restore all keeps the render list deliberately: setStatus filters the dead
+  // silently and its toast promises no count.)
   const body = $('#binBody'); body.innerHTML = ''; UI.binCount(); const ids = binIds(); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
   if (!ids.length) return body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty. Select photos anywhere and tap Bin.')));
   body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin' + (bytes ? ' · ' + fmtMB(bytes) : ''))),
     h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px' },
       h('button', { class: 'btn', onclick: async () => { if (!(await setStatus(ids, null))) return; renderBin(); UI.refreshLight(); toast('Restored everything'); } }, 'Restore all'),
-      h('button', { class: 'btn danger', onclick: async () => { if (await confirmDelete(ids)) { await deleteFromDevice(ids); renderBin(); } } }, 'Delete all')),
+      h('button', { class: 'btn danger', onclick: async () => { const now = binIds(); if (!now.length) { renderBin(); return; } if (await confirmDelete(now)) { await deleteFromDevice(now); renderBin(); } } }, 'Delete all')),
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Long-press a photo to pick only some.')));
   body.append(grid(ids, { noTrashStyle: true, loc: true }));
 }
 // The sheet's ids were captured when the Junk card was rendered and can stand open
 // for minutes; the move recounts them at the tap, in the same breath as the call
 // (R5-I3 — see the note in renderClean), so the toast is the deed's count.
+// The completion closes with cancel, like the sheet's own Cancel (R6-I3): the sheet's
+// business is its junk marks, not a travelling selection, and the two exits of one
+// sheet must not disagree about the unrelated state they leave standing.
 function openJunk(k, ids) {
   const keep = new Set(); const gm = Junk.meta(k);
   Modal.open(h('div', {}, h('h2', {}, gm.icon + ' ' + gm.name), h('p', { class: 'sub' }, 'Everything marked ✕ goes to the bin. Tap a photo to keep it.'),
-    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id) && L.meta.has(id)); if (!(await setStatus(go2, 'trash'))) return; Modal.close(); renderClean(); toast(go2.length ? `${go2.length} moved to the bin` : 'Those photos are no longer in Iris — nothing was moved.'); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close(true) }, 'Cancel')),
+    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id) && L.meta.has(id)); if (!(await setStatus(go2, 'trash'))) return; Modal.close(true); renderClean(); toast(go2.length ? `${go2.length} moved to the bin` : 'Those photos are no longer in Iris — nothing was moved.'); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close(true) }, 'Cancel')),
     grid(ids, { loc: true, cls: () => ' mark', onTap: (id, t) => { if (keep.has(id)) keep.delete(id); else keep.add(id); t.classList.toggle('mark', !keep.has(id)); } })), true);
 }
 
