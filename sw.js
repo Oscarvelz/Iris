@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v88';
+const VERSION = 'iris-v89';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
@@ -68,6 +68,14 @@ async function plausibleRuntime(res) {
   return !t.startsWith('<') && !t.startsWith('{') && !t.startsWith('[');
 }
 
+// A cache write that fails is a fact the page should hear about (the sw-shell-missing
+// channel's younger sibling): quota and cache-API failures otherwise vanish into the
+// worker's own console, and the app would go on believing its offline fallback is
+// whole. Fire-and-forget — a notification must never break the fetch it rides on.
+async function notePutFail(url) {
+  try { const cs = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' }); for (const cl of cs) cl.postMessage({ type: 'sw-put-failed', version: VERSION, url }); } catch {}
+}
+
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
@@ -86,15 +94,31 @@ self.addEventListener('fetch', (e) => {
       // it is never written over the known-good copy, and the cached copy answers in its
       // place; with nothing cached the suspect body is served — there is nothing better
       // — but it is still not cached, so it cannot become the fallback.
-      try { const res = await fetch(e.request); if (res.ok) { if (await plausibleRuntime(res)) { c.put(e.request, res.clone()); return res; } const hit = await c.match(e.request); if (hit) return hit; return res; } const hit = await c.match(e.request); if (hit) return hit; return res; }
+      // The put is part of this event's own lifetime now (R3-PS2, settled in round 5):
+      // it used to be fired detached — called, never awaited, never waitUntil'd — so a
+      // worker terminated inside the write's completion lost a fully-received runtime
+      // body, and the first-ever fetch of a runtime file (the one with no cached
+      // backstop) was exactly the fetch that could lose it. The clone is still taken
+      // synchronously, before the response is returned; the write itself is registered
+      // with waitUntil, so the worker lives until it lands, and a failure is reported
+      // to the page instead of swallowed.
+      try { const res = await fetch(e.request); if (res.ok) { if (await plausibleRuntime(res)) { const copy = res.clone(); e.waitUntil(c.put(e.request, copy).catch(() => notePutFail(e.request.url))); return res; } const hit = await c.match(e.request); if (hit) return hit; return res; } const hit = await c.match(e.request); if (hit) return hit; return res; }
       catch { const hit = await c.match(e.request); if (hit) return hit; throw new Error('offline and not cached'); }
     }));
     return;
   }
   if (url.origin === location.origin) {
     // Network-first for the page so updates arrive; fall back to cache offline.
+    // The refresh put is rebuilt to the CDN branch's standard (R5-P6): the clone is
+    // taken synchronously, in the same breath as the response — it used to sit inside
+    // a deferred caches.open().then(), by which time respondWith had taken the body
+    // and clone() threw "Response body is already used" on EVERY request, so this
+    // branch never wrote a single entry in its life and the version cache was written
+    // by install's precache alone (a shell file that missed its precache could never
+    // be cached by a later fetch — offline, it stayed missing forever). The write is
+    // waitUntil-registered and its failures are reported to the page.
     e.respondWith(fetch(e.request, { cache: 'no-cache' }).then((res) => {
-      if (res.ok) caches.open(VERSION).then((c) => c.put(e.request, res.clone()));
+      if (res.ok) { const copy = res.clone(); e.waitUntil(caches.open(VERSION).then((c) => c.put(e.request, copy)).catch(() => notePutFail(e.request.url))); }
       return res;
     }).catch(() => caches.match(e.request).then((r) => r || caches.match('./index.html'))));
   }

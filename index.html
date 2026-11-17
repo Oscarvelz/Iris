@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.73';
+const VER = 'Iris 2.74';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -523,8 +523,16 @@ try { const prevLog = JSON.parse(localStorage.getItem('iris-log') || 'null'); if
 
 /* ---------------- IndexedDB ---------------- */
 const DB = {
-  db: null,
-  open() { return new Promise((res, rej) => { const r = indexedDB.open('iris', 1); r.onupgradeneeded = () => { const d = r.result; for (const s of ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); }; r.onsuccess = () => { const d = r.result; this.db = d; d.onversionchange = () => { try { d.close(); } catch {} if (this.db === d) { this.db = null; indexGone(); } }; res(); }; r.onerror = () => rej(r.error); r.onblocked = () => { const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; rej(e); }; }); },
+  db: null, blockedError: null, onBlocked: null,
+  // onblocked is a NOTIFICATION, not a failure (R5-P4): the request stays alive and
+  // succeeds the moment the blocker leaves — but this promise used to REJECT there,
+  // and the boot watchdog keyed everything to the promise: the rejection stopped its
+  // retry interval and took the reload hook's dead branch, so an index that genuinely
+  // arrived after a late announcement never reloaded anything, and the slow surface
+  // kept pleading ignorance of a cause it had been told. Now the fact is recorded
+  // (blockedError) and announced (onBlocked, wired by boot), the promise stays
+  // pending, and its onsuccess still settles it — the heal survives the announcement.
+  open() { return new Promise((res, rej) => { const r = indexedDB.open('iris', 1); r.onupgradeneeded = () => { const d = r.result; for (const s of ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); }; r.onsuccess = () => { const d = r.result; this.db = d; this.blockedError = null; d.onversionchange = () => { try { d.close(); } catch {} if (this.db === d) { this.db = null; indexGone(); } }; res(); }; r.onerror = () => rej(r.error); r.onblocked = () => { const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; this.blockedError = e; if (this.onBlocked) { try { this.onBlocked(e); } catch {} } }; }); },
   tx(stores, mode = 'readonly') { if (!this.db) throw new Error('the index is gone — it was erased in another Iris tab; reload Iris'); return this.db.transaction(stores, mode); },
   get(store, key) { return new Promise((res, rej) => { const q = this.tx([store]).objectStore(store).get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
   put(store, key, val) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
@@ -1073,6 +1081,16 @@ const AI = {
     this.setPill('busy', 'Saving model…');
     const waitStart = Date.now();
     while (this._loading) { try { await Promise.race([this._loading, sleep(200)]); } catch {} if (this._loading && Date.now() - waitStart >= this.DL_STALL) throw new Error('The AI is still busy loading — give it a moment, then try the file again.'); }
+    // The flag is this function's own door too (R5-P2): it used to fence only
+    // load(), so a second pick landing mid-swap set it again unconditionally and
+    // ran a second part-writing loop interleaved with the first — the two part
+    // sets and manifests fought over the one cache, the first finisher died on a
+    // false integrity error over its own good file, and its error path deleted
+    // the manifest from under the survivor, orphaning a complete good model. A
+    // pick that arrives while a swap is in flight is refused at the door, exactly
+    // as load() is refused; the check and the setting below stand in one
+    // synchronous breath, so no second loop can slip between them.
+    if (this._swapping) throw new Error('The AI model is still being replaced — a moment, then try the file again.');
     // While the swap runs, the cache is this swap's alone (R4-P4): the flag flies
     // from before the first part is written until the manifest lands, and load()
     // refuses to start under it. A load that began mid-swap otherwise read a half-old,
@@ -1198,10 +1216,12 @@ const Prep = {
   // Worker pool. HEIC decoding (libheif WASM) grows each worker's memory and it never shrinks, so a worker is
   // recycled after a few HEIC photos, and a crashed worker is replaced instead of giving up on workers for good.
   pool: [], ok: true, seq: 0, rr: 0, crashes: 0, lastErr: '', n: 0, TIMEOUT: Symbol('prep-timeout'),
+  heifSilent: 0, heifDead: false, // the libheif circuit breaker (R5-PS1): consecutive HEIC jobs whose worker never answered at all — the signature of a thread parked inside the worker's synchronous libheif import, not of a slow photo
+  isHeif(f) { return /\.(heic|heif)$/i.test(f?.name || '') || /hei[cf]/i.test(f?.type || ''); },
   init() { if (this.pool.length || !this.ok) return; try { this.n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < this.n; k++) this.spawn(k); } catch { this.ok = false; } },
   spawn(k) {
     const w = new Worker('prep-worker.js'); w.jobs = new Map(); w.heavy = 0; w.retire = false;
-    w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
+    w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p && p.heif) this.heifSilent = 0; if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
     w.onerror = (e) => { e.preventDefault?.(); this.crash(k, w, e.message || 'out of memory'); };
     this.pool[k] = w;
   },
@@ -1214,6 +1234,12 @@ const Prep = {
   },
   send(msg, ms = 90000) {
     if (!this.pool.length) return Promise.resolve(undefined);
+    // The circuit breaker's gate (R5-PS1): once the class is learned, no fresh
+    // worker is fed to the silent import again this session — a HEIC job resolves
+    // exactly as a crashed one does, instantly, and its caller lands on the honest
+    // wording in run(). Other photos are untouched: the pool stays healthy for
+    // everything that is not HEIC.
+    if (this.heifDead && this.isHeif(msg.file)) return Promise.resolve(undefined);
     let k = this.rr++ % this.pool.length;
     if (this.pool[k].retire) { const j = this.pool.findIndex((w) => !w.retire); if (j >= 0) k = j; } // a retiring worker takes no new jobs
     const w = this.pool[k]; const id = ++this.seq;
@@ -1226,11 +1252,26 @@ const Prep = {
         // charged for a photo that never crashed, and the worker's late answer, if it
         // ever comes, finds no job waiting and is dropped.
         const p = w.jobs.get(id); if (!p) return; w.jobs.delete(id); w.retire = true;
+        // A HEIC job whose worker NEVER answered is a class, not a photo (R5-PS1):
+        // the worker thread is parked inside libheif's synchronous importScripts —
+        // the CDN accepted the connection and went silent — and terminating the
+        // worker frees the thread but teaches the pool nothing, so the next fresh
+        // worker walked into the same silent import and the next HEIC photo paid
+        // the full timeout ladder again, for a whole folder. Silent deaths are
+        // counted — one vote per PHOTO, not per attempt: a photo's own retry is
+        // the same witness, not a second one, and a single monstrous photo must
+        // never be allowed to name the library unreachable (the diagnosis claims
+        // only what was seen, R2-P7). Two photos in a row dying silently — any
+        // HEIC answer resets the count, because a worker that answers has the
+        // library — trip the breaker: the class is recorded, logged, and gated in
+        // send() for the rest of the session. A timeout is still not a crash —
+        // the crash counter keeps its own honest meaning.
+        if (p.heif) { const seen = this._heifCounted || (this._heifCounted = new WeakMap()); if (!seen.has(msg.file)) { seen.set(msg.file, 1); this.heifSilent++; if (this.heifSilent >= 2 && !this.heifDead) { this.heifDead = true; Log.add('ERR', 'HEIC photos are being skipped: the HEIC decoder library did not answer — the connection to it seems to be down', 'libheif'); } } }
         Log.add('warn', 'a prep job timed out; retiring its worker, other photos unaffected');
         if (!w.jobs.size) this.replace(k, w);
         res(this.TIMEOUT);
       }, ms);
-      w.jobs.set(id, { res, t });
+      w.jobs.set(id, { res, t, heif: this.isHeif(msg.file) });
       w.postMessage({ ...msg, id });
     });
   },
@@ -1248,8 +1289,10 @@ const Prep = {
     // up on the photo; a crashed job retries on the normal one.
     r = await this.send({ file: f2, ow, oh }, r === this.TIMEOUT ? 300000 : undefined); if (r !== undefined && r !== this.TIMEOUT) return r;
     // The diagnosis claims only what was actually seen: a crash only if the crash
-    // counter moved during this photo, otherwise an honest timeout.
-    this.lastErr = this.crashes > c0 ? 'the decoder crashed on this photo' : 'the decoder did not finish this photo in time — it may simply be very large';
+    // counter moved during this photo, otherwise an honest timeout — and when the
+    // circuit breaker has tripped, the wording names the network's silence for
+    // what it is instead of blaming the photo's size (R5-PS1).
+    this.lastErr = this.heifDead && this.isHeif(file) ? 'the HEIC decoder library could not be reached, so HEIC photos are paused until Iris is reopened' : this.crashes > c0 ? 'the decoder crashed on this photo' : 'the decoder did not finish this photo in time — it may simply be very large';
     return /\.(heic|heif)$/i.test(file.name || '') ? null : prep(f2, ow, oh);
   },
 };
@@ -2117,7 +2160,16 @@ const Viewer = {
       let u = null; const np = this.fastNative() && this.natPath(id);
       if (np) u = NAT_URL.replace('/f?', '/v?') + encodeURIComponent(np) + '&w=' + Math.min(2560, Math.round(Math.max(innerWidth, innerHeight) * (devicePixelRatio || 1)));
       else { const f = await Folders.fileFor(id, false); if (!f) return null; let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
-      c.url = u; const im = new Image(); im.src = u; try { await im.decode(); } catch { if (np) { this.cache.delete(id); return null; } } c.im = im; return u; })();
+      c.url = u; const im = new Image(); im.src = u;
+      // The native /v load joins the shell's stall discipline (R5-P3): this path
+      // builds the endpoint's URL itself and used to await the decode bare, so a
+      // shell that accepted and then went silent parked the promise forever —
+      // show() never reached the steps after its await (the button was never
+      // labelled, the neighbours never warmed) and nothing was logged. The decode
+      // now races the same single-shot silence budget every other shell wait
+      // lives by; a silent shell fails the upgrade honestly, says so in the log,
+      // and the thumbnail already on screen simply stays the picture.
+      try { await (np && typeof NatSized !== 'undefined' ? NatSized.stall(im.decode()) : im.decode()); } catch (e) { if (np) { this.cache.delete(id); if (/went silent/.test(e?.message || '')) Log.add('warn', 'the shell did not answer in time — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } } c.im = im; return u; })();
     this.cache.set(id, c); while (this.cache.size > 7) { const [k, o] = this.cache.entries().next().value; this.cache.delete(k); if (o.blob) o.p.then(() => o.url && URL.revokeObjectURL(o.url)); }
     return c.p;
   },
@@ -2603,12 +2655,28 @@ async function eraseIndex() {
 let indexGoneShown = false;
 function indexGone() {
   if (indexGoneShown) return; indexGoneShown = true;
+  // Being told is not enough — this tab's own work stops too (R5-PS2): a tab that
+  // was mid-indexing when another tab erased used to keep prepping and trying to
+  // save behind the recovery surface, churning battery against an index that no
+  // longer exists, until its queue happened to drain. It gets the erase discipline
+  // minus the clear: the epoch bump drops any in-flight save, the pause and the
+  // emptied queues stop new work, the tombstones halt a scan's walk at its next
+  // photo, and the shell's work service is told to stop.
+  try { Indexer.epoch++; Indexer.paused = true; Indexer.queue.length = 0; Indexer.later = []; for (const f of L.folders.values()) Indexer.removed.add(f.id); } catch {}
+  try { Work.stop(); } catch {}
   const e = new Error('the index was erased in another Iris tab'); e.erased = true;
   bootRecovery(e);
 }
 function bootRecovery(e) {
   Log.add('ERR', e?.erased ? 'the index was erased in another Iris tab — this tab is showing its copy from memory only' : e?.slow ? 'the index is taking a long time to open — the recovery surface is up while the open keeps trying' : 'boot stopped: the index would not open', e);
-  let gone = false; const reload = () => { if (!gone) { gone = true; location.reload(); } };
+  // One recovery surface per page life (R5-P5): the singleton guard used to live in
+  // the callers, unevenly — indexGone had one, boot's own paths were merely
+  // sequenced to call once — so two distinct failures in one page life stacked two
+  // sheets carrying the same id, each with live buttons. The surface guards itself
+  // now: a standing sheet is removed before the new one is appended, so the newest,
+  // best-informed word is the one that stands, and there is never more than one.
+  if (bootRecovery.ov) { try { bootRecovery.ov.remove(); } catch {} bootRecovery.ov = null; }
+  let gone = false; const reload = () => { if (!gone) { gone = true; try { Work.stop(); } catch {} location.reload(); } };
   const blocked = !!e?.blocked;
   const waitNote = h('p', { class: 'sub', style: 'display:none' }, 'Waiting for the other Iris tab to close — the erase finishes on its own as soon as it does.');
   const eraseBtn = h('button', { class: 'btn danger', onclick: () => erase() }, 'Erase index and reload');
@@ -2625,7 +2693,7 @@ function bootRecovery(e) {
     h('p', { class: 'sub' }, e?.erased ? 'Another Iris tab erased the index, so this tab’s copy of your library now lives only in its memory — nothing here can be saved anymore, and the photos it shows are the ones that were there before the erase. Reload to start from the clean slate the erase left. Your photos themselves are not touched.' : blocked ? 'Another Iris tab is holding the index open, so this tab has to wait. Close the other Iris tab, then tap Try again. Your photos themselves are not touched.' : e?.slow ? 'Opening the index is taking far longer than usual. It may be slow storage, or something may be holding it up — Iris cannot tell which, so it keeps trying: if the index arrives, the app reloads itself. You can also tap Try again, or erase the index and let Iris rebuild it. Your photos themselves are not touched.' : 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
     waitNote,
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: reload }, 'Try again'), eraseBtn)));
-  ov.id = 'bootFail'; document.body.append(ov);
+  ov.id = 'bootFail'; bootRecovery.ov = ov; document.body.append(ov);
   if (e?.erased) eraseBtn.remove(); // the index is already gone — there is nothing here to erase, only the reload makes sense
 }
 (async function boot() {
@@ -2643,9 +2711,14 @@ function bootRecovery(e) {
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (!hadController || swReloaded) return;
       try { if (sessionStorage.getItem('iris-sw-reload') === VER) return; sessionStorage.setItem('iris-sw-reload', VER); } catch {}
-      swReloaded = true; location.reload();
+      // This reload door stops the shell's work first (R5-P1): the WorkService dies
+      // only on the bridge's workStop, and the reloaded page's Work starts with
+      // bg=false, so a stop not sent now can never be sent — the "Iris is working"
+      // service would outlive the update over an idle app. eraseIndex learned this
+      // in R4-P5; the update reload was the door that cure left behind.
+      swReloaded = true; Work.stop(); location.reload();
     });
-    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); });
+    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
       // P-4, page side: an installing worker that ends redundant with no active worker means an
       // update died on the doorstep — that fact belongs in the log, not in silence.
@@ -2672,7 +2745,15 @@ function bootRecovery(e) {
   // a fresh one succeeds at once.
   const openP = DB.open();
   let openSlow = false;
-  const slowTimer = setTimeout(() => { openSlow = true; const e = new Error('the index is taking a long time to open'); e.slow = true; bootRecovery(e); openP.then(() => location.reload(), () => {}); const retry = setInterval(() => { DB.open().then(() => { clearInterval(retry); location.reload(); }, () => {}); }, 10000); openP.then(() => clearInterval(retry), () => clearInterval(retry)); }, 6000);
+  // The blocked announcement reaches the surface the moment it is known (R5-P4):
+  // DB.open leaves the fact on DB.blockedError and knocks here. If the slow surface
+  // is already standing, bootRecovery replaces it with the blocked one — the surface
+  // stops pleading ignorance of a cause it has been told. If the announcement lands
+  // before the timer, the timer reads the same fact and raises the blocked surface
+  // directly. Either way the open itself stays alive underneath, and its arrival
+  // still reloads the app: the heal no longer dies with the announcement.
+  DB.onBlocked = () => { if (openSlow && DB.blockedError) bootRecovery(DB.blockedError); };
+  const slowTimer = setTimeout(() => { openSlow = true; if (DB.blockedError) { bootRecovery(DB.blockedError); openP.then(() => location.reload(), () => {}); return; } const e = new Error('the index is taking a long time to open'); e.slow = true; bootRecovery(e); openP.then(() => location.reload(), () => {}); const retry = setInterval(() => { DB.open().then(() => { clearInterval(retry); location.reload(); }, () => {}); }, 10000); openP.then(() => clearInterval(retry), () => clearInterval(retry)); }, 6000);
   try { await openP; clearTimeout(slowTimer); if (openSlow) return; } catch (e) { clearTimeout(slowTimer); if (openSlow) return; bootRecovery(e); return; }
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
   // A stored vector that is not exactly one model's worth of bytes is damaged goods
