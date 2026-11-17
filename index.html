@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.81';
+const VER = 'Iris 2.82';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -551,6 +551,7 @@ const DB = {
   saveItem(m, thumb, vec, gen) { return new Promise((res, rej) => { const t = this.tx(gen === undefined ? ['meta', 'thumbs', 'vecs'] : ['meta', 'thumbs', 'vecs', 'kv'], 'readwrite'); let wrote = gen === undefined; const put = () => { t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); }; if (gen === undefined) put(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) { wrote = true; put(); } }; } t.oncomplete = () => res(wrote); t.onerror = () => rej(t.error); }); },
   swapItem(m, buf, oldId) { return new Promise((res, rej) => { const t = this.tx(['meta', 'vecs', 'thumbs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('vecs').put(buf, m.id); t.objectStore('meta').delete(oldId); t.objectStore('vecs').delete(oldId); t.objectStore('thumbs').delete(oldId); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   putMetas(ms) { return new Promise((res, rej) => { if (!ms.length) return res(); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); for (const m of ms) o.put(m, m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  putMetasIfLive(ms) { return new Promise((res, rej) => { if (!ms.length) return res([]); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); const skipped = []; for (const m of ms) { const q = o.get(m.id); q.onsuccess = () => { if (q.result) o.put(m, m.id); else skipped.push(m.id); }; } t.oncomplete = () => res(skipped); t.onerror = () => rej(t.error); }); },
   removeItems(ids) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); for (const id of ids) for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   // One transaction, one world (R5-D6): a readonly transaction sees the store exactly
@@ -1586,8 +1587,20 @@ async function setStatus(ids, status) { const ms = []; for (const id of ids) { c
   try { const g = await DB.get('kv', 'indexGen'); const curG = g == null ? null : g; const anchor = (typeof Indexer !== 'undefined' && Indexer.gen !== undefined) ? Indexer.gen : setStatus._gen; let moved = false; if (anchor === undefined) setStatus._gen = curG; else if (anchor === null && curG !== null) moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(curG) : true; else if (curG !== anchor) moved = true; if (moved) { Log.add('warn', 'status change not saved: the index was erased in another tab'); toast('That change was not saved — the index was erased in another tab, and this copy of Iris is out of date. Reload to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return false; } } catch {}
   // Persist FIRST, believe second: the in-memory status flips only after the durable write
   // lands, so a failed write (quota) never leaves the UI believing a move that didn't save.
-  try { await DB.putMetas(ms.map((m) => ({ ...m, status }))); } catch (e) { Log.add('ERR', 'status change not saved', e.message); toast(`That change didn't save (${e.message}). Nothing was moved.`, 6000); return false; }
-  for (const m of ms) m.status = status;
+  // The write re-asks the store who still exists, inside the write's own transaction
+  // (R8-I2): the generation fence above asks WHICH world this is, never whether a given
+  // record still stands in it — and another tab's deleteFromDevice can remove a record
+  // outright between a caller's read (Restore-all unions the store's bin at its tap) and
+  // this write. Writing memory's copy back regardless planted a meta-only zombie and let
+  // the caller count it toward its total. putMetasIfLive writes only the records the
+  // store still holds, in the same transaction that checks; the rest are pruned from
+  // memory below, so every caller's count after this returns is a count of what the
+  // store accepted.
+  let gone = [];
+  try { gone = await DB.putMetasIfLive(ms.map((m) => ({ ...m, status }))); } catch (e) { Log.add('ERR', 'status change not saved', e.message); toast(`That change didn't save (${e.message}). Nothing was moved.`, 6000); return false; }
+  const goneSet = new Set(gone);
+  for (const m of ms) if (!goneSet.has(m.id)) m.status = status;
+  if (gone.length) { const names = gone.map((id) => L.meta.get(id)?.name || id); for (const id of gone) L.meta.delete(id); L.rebuild(); Log.add('warn', 'status change skipped photos that are no longer in the index', names.join(', ')); }
   Junk.cache = null; Junk.epoch++; // statuses changed, so the live set Junk scored has changed too — its count-keyed cache must not outlive a bin move or a restore (D-3); the epoch move also tells a Junk compute still in flight that its world has moved (R3-I5)
   UI.binCount(); return true; }
 
@@ -2815,7 +2828,9 @@ function renderBin() {
   // everything", over a bin the store still held. The total may only be said
   // about the bin as the store holds it at the tap: the handler unions the
   // store's bin with memory's, restores what this tab knows, and names any
-  // remainder it could not reach instead of folding it into the claim.
+  // remainder it could not reach instead of folding it into the claim. The
+  // write side of that bargain is R8-I2, at setStatus: the total is earned
+  // again at the write, and the count below is what the store accepted.
   const body = $('#binBody'); body.innerHTML = ''; UI.binCount(); const ids = binIds(); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
   if (!ids.length) return body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty. Select photos anywhere and tap Bin.')));
   body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin' + (bytes ? ' · ' + fmtMB(bytes) : ''))),
@@ -2824,9 +2839,11 @@ function renderBin() {
         try { storeBin = new Set(); if (typeof DB.all === 'function') { for (const pair of await DB.all('meta')) if (pair[1] && pair[1].status === 'trash') storeBin.add(pair[0]); } else { for (const id of L.ids) { const m = await DB.get('meta', id); if (m && m.status === 'trash') storeBin.add(id); } } } catch { storeBin = null; }
         if (storeBin) now = [...new Set([...now, ...[...storeBin].filter((id) => L.meta.has(id))])];
         if (!(await setStatus(now, null))) return; renderBin(); UI.refreshLight();
+        const done = now.filter((id) => L.meta.has(id)); // setStatus pruned whatever the store no longer held (R8-I2) — the count said here is what the store accepted, not what the tap attempted
         const left = storeBin ? [...storeBin].filter((id) => !now.includes(id)) : [];
-        if (!storeBin) toast(`Restored ${now.length}`);
-        else if (left.length) toast(`Restored ${now.length} — ${left.length} more ${left.length === 1 ? 'photo sits' : 'photos sit'} in the bin in a newer copy of the index; reload Iris to restore ${left.length === 1 ? 'it' : 'them'}.`, 5500);
+        if (!storeBin) toast(`Restored ${done.length}`);
+        else if (left.length) toast(`Restored ${done.length} — ${left.length} more ${left.length === 1 ? 'photo sits' : 'photos sit'} in the bin in a newer copy of the index; reload Iris to restore ${left.length === 1 ? 'it' : 'them'}.`, 5500);
+        else if (done.length < now.length) toast(`Restored ${done.length} of ${now.length} — the rest are no longer in Iris and could not be restored.`, 5500);
         else toast('Restored everything'); } }, 'Restore all'),
       h('button', { class: 'btn danger', onclick: async () => { const now = binIds(); if (!now.length) { renderBin(); return; } if (await confirmDelete(now)) { await deleteFromDevice(now); renderBin(); } } }, 'Delete all')),
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Long-press a photo to pick only some.')));
@@ -2955,7 +2972,12 @@ function go(v) { if (v !== cur) { NavStack.push(cur); if (NavStack.length > 30) 
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
 $('#binBtn').onclick = () => { if (Sel.on) endSel(); go('bin'); };
 $('#pill').onclick = () => { if (AI.state === 'err') ensureAI(); else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
-$('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
+// The file picker's answer can land after the telling (R8-I1): the picker is
+// the system's own surface and stands while another tab erases, so the pick
+// is refused at the door in a dead world — no iris-ob mark, no install, no
+// askFolder over the recovery sheet. The file can be picked again after the
+// reload, from the Library's model card.
+$('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
 // "Folder, no pop-up" uses <input webkitdirectory>. Some Android browsers (Edge) ignore it silently, so watch for the
 // picker actually opening; if the page never loses focus, say so instead of doing nothing.
 function pickDir() {
@@ -2970,7 +2992,12 @@ $('#fBackup').onchange = async (e) => { const f = e.target.files[0]; e.target.va
 if (NATIVE) addEventListener('irisnative-resume', async () => { if (cur === 'lib' && Batt.asking) { Batt.asking = false; const st = $('#main').scrollTop; await renderLib(); $('#main').scrollTop = st; } }); // back from Android's battery switch: show its new state, without losing your place
 
 /* ---------------- Onboarding ---------------- */
-$('#obGo').onclick = async () => { $('#obGo').disabled = true; try { await AI.load(); localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
+// The welcome flow refuses the dead world at both ends (R8-I1): a tap after
+// the telling starts nothing, and a download already in flight when the
+// telling lands does not complete the flow — no iris-ob mark, no askFolder
+// invitation over the recovery sheet. The download itself is a cache write
+// and harms nothing; it is there, ready, after the reload.
+$('#obGo').onclick = async () => { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; $('#obGo').disabled = true; try { await AI.load(); if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
@@ -3057,6 +3084,7 @@ function indexGone() {
   try { if (typeof Sel !== 'undefined' && Sel && Sel.on) endSel(); } catch {}
   try { if (typeof Viewer !== 'undefined' && Viewer) Viewer.close(); } catch {}
   try { if (typeof Modal !== 'undefined' && Modal) Modal.closeAll(); } catch {}
+  try { const ob = $('#onboard'); if (ob) ob.classList.remove('on'); } catch {} // the onboarding stands down too (R8-I1): a fourth overlay at z-30, above this sheet, that the enumeration above missed — left standing, its welcome flow could still spend the ~440 MB model download over the sheet and re-arm the modal stack (askFolder) in a tab whose world is gone
   const e = new Error('the index was erased in another Iris tab'); e.erased = true;
   bootRecovery(e);
 }
