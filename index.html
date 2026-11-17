@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.91';
+const VER = 'Iris 2.92';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -2884,7 +2884,7 @@ const Viewer = {
       let u = null; const np = this.fastNative() && this.natPath(id);
       if (np) u = NAT_URL.replace('/f?', '/v?') + encodeURIComponent(np) + '&w=' + Math.min(2560, Math.round(Math.max(innerWidth, innerHeight) * (devicePixelRatio || 1)));
       else { const f = await Folders.fileFor(id, false); if (!f) { if (this.cache.get(id) === c) this.cache.delete(id); if (this.blinkSay(id)) Log.add('warn', 'the original file could not be fetched — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
-      if (!np && this._blinkTold) this._blinkTold.delete(id); c.url = u; const im = new Image(); im.src = u;
+      c.url = u; const im = new Image(); im.src = u;
       // The native /v load joins the shell's stall discipline (R5-P3): this path
       // builds the endpoint's URL itself and used to await the decode bare, so a
       // shell that accepted and then went silent parked the promise forever —
@@ -2897,7 +2897,7 @@ const Viewer = {
       // LRU evicted this entry while its stall was still running and the photo
       // was re-fetched and decoded into a fresh entry in the meantime, the
       // stale catch must not evict the healthy copy it no longer owns.
-      try { await (np && typeof NatSized !== 'undefined' ? NatSized.stall(im.decode()) : im.decode()); } catch (e) { if (np) { if (this.cache.get(id) === c) this.cache.delete(id); if (/went silent/.test(e?.message || '')) Log.add('warn', 'the shell did not answer in time — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } } if (np && this._blinkTold) this._blinkTold.delete(id); c.im = im; return u; })();
+      let decoded = true; try { await (np && typeof NatSized !== 'undefined' ? NatSized.stall(im.decode()) : im.decode()); } catch (e) { decoded = false; if (np) { if (this.cache.get(id) === c) this.cache.delete(id); if (/went silent/.test(e?.message || '')) Log.add('warn', 'the shell did not answer in time — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } } if (decoded && this._blinkTold) this._blinkTold.delete(id); c.im = im; return u; })();
     this.cache.set(id, c); while (this.cache.size > 7) { const [k, o] = this.cache.entries().next().value; this.cache.delete(k); if (o.blob) o.p.then(() => o.url && URL.revokeObjectURL(o.url)); }
     return c.p;
   },
@@ -2909,11 +2909,17 @@ const Viewer = {
   // photo's first failure always speaks, and its repeats speak while the
   // session's repeat ration lasts — the indexer's own skipped ration,
   // five — after which the failure is counted here and not written. A
-  // photo that loads again clears its mark (at full()'s success above —
-  // on the fetch path when the bytes are in hand, on the native path only
-  // once its decode has answered: a native URL is constructed, not loaded,
-  // and a native attempt that then stalls must not renew the episode,
-  // R10-PS1), so a later failure episode earns its own first word.
+  // photo that loads again clears its mark — at a PROVEN load, on every
+  // path that can load one. In full() the proof is the deciding decode's
+  // answer, on the fetch path as on the native: bytes in hand are not a
+  // load (for a non-HEIC original nothing has decoded them yet, and a
+  // fetch-path decode rejection used to leave the episode renewed by a
+  // load that did not happen, R11-PS1), and a native URL is constructed,
+  // not loaded, so a native attempt that then stalls must not renew the
+  // episode either (R10-PS1). And showFile() — the #vFull manual retry —
+  // clears it when its load lands (R11-P1): it was a third load path the
+  // census never enumerated, and its successes renewed nothing. So a
+  // later failure episode earns its own first word.
   blinkSay(id) { const told = this._blinkTold || (this._blinkTold = new Set()); if (!told.has(id)) { told.add(id); return true; } return (this._blinkMore = (this._blinkMore || 0) + 1) <= 5; },
   warm(id) { if (L.meta.has(id)) this.full(id).catch(() => {}); },
   // The rescue's word: an announcement must never be able to break the rescue itself.
@@ -2946,7 +2952,11 @@ const Viewer = {
   // The #vFull handler awaits the original file before calling this, so whatever the
   // file type, the photo on screen must still be the one the file belongs to when it
   // lands: the index check the HEIF branch always had, now on every path (R3-I2).
-  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return false; } if (this.list[this.i] !== id) return false; const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); $('#vImg').src = u; return true; },
+  // A load that lands also renews the photo's blink episode (R11-P1), like full()'s
+  // proven loads — this is a load path too, and its successes were the only ones that
+  // paid no renewal. A failed attempt (no body from Prep.big, or the photo stepped
+  // away from before the file landed) changes nothing.
+  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return false; } if (this.list[this.i] !== id) return false; const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); if (this._blinkTold) this._blinkTold.delete(id); $('#vImg').src = u; return true; },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.show(); },
 };
 $('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.step(-1); $('#vNext').onclick = () => Viewer.step(1);
@@ -3602,6 +3612,27 @@ function bootRecovery(e) {
   if (bootRecovery.erasePends && cls !== 'erased') { waitNote.style.display = ''; eraseBtn.disabled = true; }
   if (e?.erased) eraseBtn.remove(); // the index is already gone — there is nothing here to erase, only the reload makes sense
 }
+// The shell-missing word's durable road (R11-PS2): the worker's install report is a
+// postMessage to the clients alive in that breath, and an install that completes with
+// zero window clients used to record the failure nowhere — the version then ran its
+// whole life with the word unspoken. The worker now also leaves a note per failed
+// install in the 'iris-sw-notes' cache (a name the worker's activate sweep never
+// touches, so a note survives until a page reads it — a later version's page
+// included, and the word it speaks is that install's own). This audit runs at boot:
+// it speaks the same word the live message speaks, for every note waiting, and
+// deletes each note as it is read. The live message handler deletes its note too,
+// so the word is spoken exactly once — by whichever road reaches a page first.
+async function swNoteAudit() {
+  try {
+    const nc = await caches.open('iris-sw-notes');
+    for (const req of await nc.keys()) {
+      const r = await nc.match(req); await nc.delete(req);
+      if (!r) continue;
+      const n = await r.json().catch(() => null);
+      if (n && Array.isArray(n.failed) && n.failed.length) Log.add('warn', 'the ' + (n.version || 'new') + ' update installed without: ' + n.failed.join(', ') + ' — everything else updated normally');
+    }
+  } catch {}
+}
 (async function boot() {
   applyTheme(themeNow(), false);
   if ('serviceWorker' in navigator) {
@@ -3624,7 +3655,9 @@ function bootRecovery(e) {
       // in R4-P5; the update reload was the door that cure left behind.
       swReloaded = true; Work.stop(); location.reload();
     });
-    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
+    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') { Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); if (d.version) caches.open('iris-sw-notes').then((nc) => nc.delete('shell-missing/' + d.version)).catch(() => {}); } else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
+    // Speak any shell-missing word an earlier clientless install left behind (R11-PS2).
+    swNoteAudit();
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
       // P-4, page side: an installing worker that ends redundant with no active worker means an
       // update died on the doorstep — that fact belongs in the log, not in silence.

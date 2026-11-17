@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v106';
+const VERSION = 'iris-v107';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
@@ -13,7 +13,20 @@ self.addEventListener('install', (e) => {
     const c = await caches.open(VERSION);
     const failed = [];
     await Promise.all(SHELL.map(async (u) => { try { await c.add(u); } catch { failed.push(u); } }));
-    if (failed.length) { const cs = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' }); for (const cl of cs) cl.postMessage({ type: 'sw-shell-missing', version: VERSION, failed }); }
+    if (failed.length) {
+      // The word also leaves a durable note (R11-PS2): the postMessage below reaches
+      // only the clients alive in this breath, and an install that completes with
+      // zero window clients used to record the failure nowhere — the version then
+      // ran its whole life with the failure unspoken. The note waits in
+      // 'iris-sw-notes' until a page reads it at boot, speaks the same word, and
+      // deletes it; a page that hears the live message deletes it too, so the word
+      // is spoken exactly once, by whichever road reaches a page first. The note is
+      // written before the message is posted, so a listening page can always clear
+      // it. Its failure is swallowed like the report's own: a notification must
+      // never break the install it rides on.
+      try { const nc = await caches.open('iris-sw-notes'); await nc.put('shell-missing/' + VERSION, new Response(JSON.stringify({ version: VERSION, failed }), { headers: { 'content-type': 'application/json' } })); } catch {}
+      const cs = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' }); for (const cl of cs) cl.postMessage({ type: 'sw-shell-missing', version: VERSION, failed });
+    }
     await self.skipWaiting();
   })());
 });
@@ -23,6 +36,9 @@ self.addEventListener('activate', (e) => {
     // 'iris-runtime' (unversioned, cache-first) is retired too: it accumulated entries since the
     // app's first days and is a suspect in the worker's 'ModuleFactory not set' failure — a bad
     // cached body for the WASM loader would be served forever. Its replacement is versioned.
+    // 'iris-sw-notes' is deliberately outside this sweep — it matches neither arm (it does
+    // not start with 'iris-v' and is not 'iris-runtime'): a shell-missing note (R11-PS2)
+    // must survive until a page has read it, which may be a later version's page.
     caches.keys().then((keys) => Promise.all(keys.filter((k) => (k.startsWith('iris-v') && k !== VERSION) || k === 'iris-runtime').map((k) => caches.delete(k))))
       // A runtime cache inherited from an older worker gets one honest audit (R4-PS1):
       // a worker from before plausibleRuntime could have cached an impostor body into
