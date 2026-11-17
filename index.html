@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.95';
+const VER = 'Iris 2.96';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -649,6 +649,48 @@ const DB = {
   // no token and one appeared inside the gap — the family's tri-state law,
   // judged in the same transaction.
   delCollIfEmpty(id, gen) { return new Promise((res, rej) => { const t = this.tx(gen === undefined ? ['colls'] : ['colls', 'kv'], 'readwrite'); let out = false; const write = () => { const q = t.objectStore('colls').get(id); q.onsuccess = () => { const cur = q.result; if (!cur) { out = 'gone'; return; } if (Array.isArray(cur.ids) && !cur.ids.length) { t.objectStore('colls').delete(id); out = 'gone'; } else out = 'kept'; }; }; if (gen === undefined) write(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) write(); else if (gen === null && cur !== null) out = 'unjudged'; }; } t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
+  // A canonical form for a stored record (R13-DS1): two records are the
+  // same deed only if every field matches, keys in a fixed order, so the
+  // take-back primitives below can judge CONTENT inside their deleting
+  // transactions — the removeOrphans pattern, strengthened from standing
+  // to identity. Records are JSON-shaped by construction (they arrive
+  // from a parsed backup or from the store itself), and undefined-valued
+  // keys are skipped, as a JSON round trip would skip them.
+  _canon(v) { if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'; if (Array.isArray(v)) return '[' + v.map((x) => this._canon(x)).join(',') + ']'; return '{' + Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => JSON.stringify(k) + ':' + this._canon(v[k])).join(',') + '}'; },
+  // The restore tail's collection write (R13-D1): putCollIfLive judges a
+  // collection's MEMBERSHIP inside its transaction but lands the record
+  // itself unconditionally — the dialog's question. The restore's question
+  // is the prior one: does the store hold this collection AT ALL? The
+  // tail used to ask that in one breath (DB.get) and write in the next
+  // (an unconditional DB.put), and a collection another tab landed in
+  // that breath — its own name, its own members — was silently rewound
+  // by the backup's older copy and counted as a restoration: the one
+  // writer in the restore loop the check→write census never enrolled.
+  // Here existence is judged inside the writing transaction itself: the
+  // record lands only if the store holds nothing under its id at the
+  // writing moment, and a collection that stands — whenever it arrived —
+  // stands. The backup's copy lands VERBATIM when it lands (the restore
+  // reinstates the collection as the backup recorded it; its member
+  // photos were this same restore's business in the entries loop — the
+  // membership filter above governs interactive saves, not this). The
+  // restore's fence stays its erased() asks, like its sibling writes
+  // (birthItem, the kept path's puts), so no generation is carried. The id
+  // is passed, not read off the record: a backup's collection rides as an
+  // [id, record] pair and the record itself need not carry its id (the
+  // dialog's records do; the tail's may not).
+  // Resolves true when the collection landed, false when one stood.
+  putCollIfAbsent(id, coll) { return new Promise((res, rej) => { const t = this.tx(['colls'], 'readwrite'); const o = t.objectStore('colls'); let out = false; const q = o.get(id); q.onsuccess = () => { if (!q.result) { o.put(coll, id); out = true; } }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
+  // The restore take-back's collection delete (R13-DS1): the shell
+  // take-back above (delCollIfEmpty) re-asks whether its record is still
+  // the shell it means to remove; a restore retracting into a world that
+  // replaced its own owes the same question in full. The collection dies
+  // only if what the store holds is still, field for field, the copy this
+  // restore wrote — a collection the fresh world re-created under the
+  // same id (collection ids ride in the backup, and a name another tab
+  // re-uses is the same id) is that world's own deed and stands.
+  // Resolves true when the collection was deleted here, false when it
+  // stands as anything else (another world's copy, or already gone).
+  delCollIfWritten(id, coll) { return new Promise((res, rej) => { const t = this.tx(['colls'], 'readwrite'); const o = t.objectStore('colls'); let out = false; const q = o.get(id); q.onsuccess = () => { if (q.result && this._canon(q.result) === this._canon(coll)) { o.delete(id); out = true; } }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
   // The batch delete, with the generation carried inside its transaction
   // when one is given (R11-DS2): the same tri-state law as put/del — the
   // token is read in the deleting breath, so a clear committing between a
@@ -674,6 +716,20 @@ const DB = {
   // exactly as boot's load loop promises when it leaves such a record out of L.
   // Resolves the ids actually removed.
   removeOrphans(ids) { return new Promise((res, rej) => { if (!ids.length) return res([]); const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); const gone = []; for (const id of ids) { let m = null, v = null, seen = 0; const ask = () => { if (++seen === 2 && !(m && v && v.byteLength === DIM * 4)) { for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); gone.push(id); } }; const qm = t.objectStore('meta').get(id); qm.onsuccess = () => { m = qm.result || null; ask(); }; const qv = t.objectStore('vecs').get(id); qv.onsuccess = () => { v = qv.result || null; ask(); }; } t.oncomplete = () => res(gone); t.onerror = () => rej(t.error); }); },
+  // The restore take-back's batch delete (R13-DS1): removeItems deletes
+  // by bare id, and a record id is a pure function of folder + path +
+  // name — a fresh world's re-scan of the same folder re-mints the very
+  // id a dead restore wrote, binned perhaps by that world's own decision.
+  // The retraction that discovered the erase therefore owes each record
+  // the removeOrphans question, in full: not "does it stand?" but "is
+  // what stands still THIS restore's write?" — judged inside the deleting
+  // transaction, field for field against the meta the restore left
+  // standing (a birth's stamped copy, a keep's kept copy). A record the
+  // fresh world replaced — its scan copy carries no fromBak and its own
+  // status — is that world's deed and stands; only the restore's own
+  // surviving writes are taken back. Takes [id, meta] pairs; resolves
+  // the ids actually removed.
+  removeItemsIfWritten(pairs) { return new Promise((res, rej) => { if (!pairs.length) return res([]); const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); const o = t.objectStore('meta'); const gone = []; for (const [id, snap] of pairs) { if (!snap) continue; const q = o.get(id); q.onsuccess = () => { if (q.result && this._canon(q.result) === this._canon(snap)) { for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); gone.push(id); } }; } t.oncomplete = () => res(gone); t.onerror = () => rej(t.error); }); },
   clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   // One transaction, one world (R5-D6): a readonly transaction sees the store exactly
   // as it stood when the transaction began — a writer in another transaction lands
@@ -928,6 +984,13 @@ const Backup = {
       let gen0 = null; try { const g = await DB.get('kv', 'indexGen'); gen0 = g == null ? null : g; } catch {}
       const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); const cur = g == null ? null : g; if (gen0 === null) { if (cur === null) return false; const moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(cur) : true; if (!moved) { gen0 = cur; return false; } return true; } return cur !== gen0; } catch { return true; } };
       const wrote = []; let aborted = false;
+      // What each write left standing, kept beside the ids (R13-DS1): the
+      // retractions below must tell this restore's own writes from a fresh
+      // world's same-id rebirth, and only content can — a birth's record
+      // is its stamped copy, a keep's is the kept copy. The snapshots are
+      // deep copies taken at the writing moment, so later life in L (a
+      // status flip on the shared object) cannot rewrite the evidence.
+      const written = new Map(); const snap = (o) => JSON.parse(JSON.stringify(o));
       // The durable trace of candidates an earlier adoption on THIS device already consumed
       // (R3-D2): their entries must not be written back as phantom duplicates. It is re-read
       // from the store, never served from this session's cache: another tab may have adopted
@@ -979,8 +1042,8 @@ const Backup = {
       // back out and counted gone — never resurrected into a second adoption.
       const keepFromStore = async (stored, vec) => {
         await DB.put('vecs', stored.id, vec); wrote.push(stored.id);
+        const keep = { ...stored, fromBak: true }; written.set(stored.id, snap(keep)); // the kept copy is what this write leaves standing, stamped or already so (R13-DS1)
         if (await erased()) return 'aborted';
-        const keep = { ...stored, fromBak: true };
         if (!stored.fromBak) await DB.put('meta', stored.id, keep);
         const mNow = await DB.get('meta', stored.id); const vNow = mNow ? await DB.get('vecs', stored.id) : null;
         if (!mNow || !vNow) { try { await DB.del('meta', stored.id); } catch {} try { await DB.del('vecs', stored.id); } catch {} return 'gone'; }
@@ -1020,6 +1083,7 @@ const Backup = {
         const storedB = await DB.get('meta', e.m.id);
         if (storedB) { const kr = await keepFromStore(storedB, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; continue; } n++; kept++; continue; }
         const m = { ...e.m, fromBak: true }; // brought in by this restore — and only records a restore brought in may be adopted later (R2-D9)
+        written.set(e.m.id, snap(m)); // the birth's fingerprint, taken before the write so even the fallback's mid-birth abort is covered (R13-DS1)
         // Born in L BEFORE its first durable write (R3-D7): this tab's own orphan
         // sweep selects from L, so a record being restored is never its candidate.
         // Every OTHER tab's sweep selects from ITS L, though, where the record
@@ -1060,11 +1124,12 @@ const Backup = {
       // The collections tail is parsed defensively, entry by entry (R3-D4): a malformed
       // entry is skipped and counted — it must never throw into the outer catch and report
       // a landed restore as a total failure, nor cost the photos their adoption window.
-      const wroteC = [];
-      if (Array.isArray(head.colls)) for (const pair of head.colls) { if (await erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; const sc = await DB.get('colls', id); if (sc) { skippedC++; if (!L.colls.has(id)) L.colls.set(id, sc); continue; } try { await DB.put('colls', id, c); wroteC.push(id); L.colls.set(id, c); nc++; } catch { failedC++; } } // "already here" is decided by the STORE, not by this tab's collection set (R6-D2): a collection another tab deleted was counted "already here and kept" on memory's say-so and never written back — absent at the next boot under a success word. The store is asked; a collection it holds is kept (and learned, if this tab lacked it), and one it lacks is written back and counted restored.
+      const wroteC = []; const writtenC = new Map(); // each landed collection's written copy, kept for the retractions' content judgement (R13-DS1)
+      if (Array.isArray(head.colls)) for (const pair of head.colls) { if (await erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; const sc = await DB.get('colls', id); if (sc) { skippedC++; if (!L.colls.has(id)) L.colls.set(id, sc); continue; } try { const landed = typeof DB.putCollIfAbsent === 'function' ? await DB.putCollIfAbsent(id, c) : (await DB.put('colls', id, c), true); if (landed) { wroteC.push(id); writtenC.set(id, snap(c)); L.colls.set(id, c); nc++; } else { skippedC++; const sc2 = await DB.get('colls', id); if (sc2 && !L.colls.has(id)) L.colls.set(id, sc2); } } catch { failedC++; } } // "already here" is decided by the STORE, not by this tab's collection set (R6-D2): a collection another tab deleted was counted "already here and kept" on memory's say-so and never written back — absent at the next boot under a success word. The store is asked; a collection it holds is kept (and learned, if this tab lacked it), and one it lacks is written back and counted restored. The write itself is judged inside its own transaction (R13-D1, DB.putCollIfAbsent): the ask can still be overtaken in its breath — a collection another tab lands there STANDS, is learned, and counts as already here, never rewound by the backup's older copy and never counted as this restore's deed.
       else if (head.colls != null) badC++;
       if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2) — and the discoverer stands the foreground down itself (R12-I3): every other discoverer of an erase (the scan, setStatus, Folders, saveCollDialog) calls indexGone() at its own discovery; a restore that simply walked away left the foreground armed in a dead world until the user's next fenced deed tripped a fence there
-        try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } } catch {}
+        try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch {} // the take-back's acts are independent here too (R13-DS2), and every deletion judges content — only this restore's own writes are taken back, never a fresh world's same-id rebirth (R13-DS1)
+        for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch {} L.colls.delete(id); }
         Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length);
         toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
       // Dismissed groups merge in as a union and persist, so they stay dismissed on this
@@ -1089,7 +1154,19 @@ const Backup = {
       // stands the foreground down itself (R12-I3), as at the abort face
       // above: the retraction is a discovery of the erase, and a discovery
       // that walks away armed is the parity break the round charged.
-      if (await erased()) { this.on = false; this.pool = null; try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } if (n || nc) { try { await DB.put('kv', 'adoptPool', false); } catch {} } } catch {} Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length); toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
+      if (await erased()) { this.on = false; this.pool = null;
+        // The retraction's acts are independent (R13-DS2): the disarm is
+        // attempted FIRST and on its own — it is the act that makes the
+        // abort word true for the next boot — so no failure of the
+        // take-back can strand the armed window standing in the fresh
+        // world under that word, and a disarm that itself fails is logged
+        // by name rather than swallowed behind it. The take-back, in
+        // turn, deletes only what is still this restore's own write
+        // (R13-DS1, DB.removeItemsIfWritten / DB.delCollIfWritten).
+        if (n || nc) { try { await DB.put('kv', 'adoptPool', false); } catch (e) { Log.add('ERR', 'restore stopped but could not disarm the adoption window it armed', e?.message || String(e)); } }
+        try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch {}
+        for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch {} L.colls.delete(id); }
+        Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length); toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
       if (gone) Log.add('info', 'restore skipped photos already matched into this device', gone);
       if (badNames.length) Log.add('ERR', 'restore skipped damaged backup entries', badNames.join(', '));
       if (badC) Log.add('ERR', 'restore skipped damaged collection entries', badC);
