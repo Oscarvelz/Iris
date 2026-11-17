@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.86';
+const VER = 'Iris 2.87';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -571,8 +571,30 @@ const DB = {
   saveItem(m, thumb, vec, gen) { return new Promise((res, rej) => { const t = this.tx(gen === undefined ? ['meta', 'thumbs', 'vecs'] : ['meta', 'thumbs', 'vecs', 'kv'], 'readwrite'); let wrote = gen === undefined; const put = () => { t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); }; if (gen === undefined) put(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) { wrote = true; put(); } else if (gen === null && cur !== null) wrote = 'unjudged'; }; } t.oncomplete = () => res(wrote); t.onerror = () => rej(t.error); }); },
   swapItem(m, buf, oldId) { return new Promise((res, rej) => { const t = this.tx(['meta', 'vecs', 'thumbs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('vecs').put(buf, m.id); t.objectStore('meta').delete(oldId); t.objectStore('vecs').delete(oldId); t.objectStore('thumbs').delete(oldId); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   putMetas(ms) { return new Promise((res, rej) => { if (!ms.length) return res(); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); for (const m of ms) o.put(m, m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-  putMetasIfLive(ms) { return new Promise((res, rej) => { if (!ms.length) return res([]); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); const skipped = []; for (const m of ms) { const q = o.get(m.id); q.onsuccess = () => { if (q.result) o.put(m, m.id); else skipped.push(m.id); }; } t.oncomplete = () => res(skipped); t.onerror = () => rej(t.error); }); },
+  // The status writer's write (R8-I2 + R10-S2): existence is re-asked inside the
+  // write's own transaction, and what lands for a record that stands is the
+  // STORE's record with only the incoming status applied — never the caller's
+  // memory object entire. Memory can predate the store: a restore in another
+  // tab stamps fields (fromBak above all) onto the store's copy, and writing
+  // the stale object over it stripped the stamp silently, dropping the record
+  // out of the adoption pool's scope. This writer's one intended change is the
+  // status; everything else the record carries is the store's to keep.
+  putMetasIfLive(ms) { return new Promise((res, rej) => { if (!ms.length) return res([]); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); const skipped = []; for (const m of ms) { const q = o.get(m.id); q.onsuccess = () => { if (q.result) o.put({ ...q.result, status: m.status }, m.id); else skipped.push(m.id); }; } t.oncomplete = () => res(skipped); t.onerror = () => rej(t.error); }); },
   removeItems(ids) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); for (const id of ids) for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  // The orphan sweep's delete re-validates inside its own transaction (R10-D1):
+  // victim selection reads the sweeping tab's L, a snapshot — a record another
+  // tab saved COMPLETE after the snapshot stands in the store but not in L,
+  // and a plain delete ate it on the snapshot's say-so, in a world whose
+  // generation never moved, so no fence anywhere could see the loss. Here each
+  // candidate is asked again, in the deleting breath: an id is removed only if
+  // it still does not stand as a complete record — a meta plus a full-size
+  // vector. A complete pair is a live record, whoever saved it and whenever;
+  // anything thinner is the durable half-record the sweep exists for — the
+  // damaged-vector record included: its vec stands at the wrong size, so it is
+  // collected here and the photo is understood again at its next folder check,
+  // exactly as boot's load loop promises when it leaves such a record out of L.
+  // Resolves the ids actually removed.
+  removeOrphans(ids) { return new Promise((res, rej) => { if (!ids.length) return res([]); const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); const gone = []; for (const id of ids) { let m = null, v = null, seen = 0; const ask = () => { if (++seen === 2 && !(m && v && v.byteLength === DIM * 4)) { for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); gone.push(id); } }; const qm = t.objectStore('meta').get(id); qm.onsuccess = () => { m = qm.result || null; ask(); }; const qv = t.objectStore('vecs').get(id); qv.onsuccess = () => { v = qv.result || null; ask(); }; } t.oncomplete = () => res(gone); t.onerror = () => rej(t.error); }); },
   clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   // One transaction, one world (R5-D6): a readonly transaction sees the store exactly
   // as it stood when the transaction began — a writer in another transaction lands
@@ -619,15 +641,27 @@ const DB = {
    indexer; the folder-removal call is scoped to that folder's id prefix and stands down
    entirely while a run is in flight, so a record mid-birth is never eaten. Restore's
    births are fenced by the same membership: a restored record is added to L before its
-   first durable write, so it is never collectable mid-birth either (R3-D7). */
+   first durable write, so it is never collectable mid-birth either (R3-D7).
+   The census itself is one tab's memory, though (R10-D1): boot loads L, then
+   awaits folders, collections and the generation claim before sweeping — and
+   a record another tab saves complete inside that span stands in the store
+   but not in this tab's L, under a generation that never moved, so no fence
+   could see it eaten. Selection still names the candidates from L, but the
+   delete re-validates each one against the store in its own transaction
+   (DB.removeOrphans): a candidate that now stands as a complete record — a
+   meta and a full-size vector — is a live record and is spared, whoever
+   saved it; only what still stands thinner is collected. (In a world whose
+   DB predates that primitive, the same spare is applied from the census's
+   own per-store key sets before the plain delete.) */
 async function sweepOrphans(onlyFolder = null) {
   if (onlyFolder && Indexer.running) return 0;
   try {
     const keys = (s) => new Promise((res, rej) => { const q = DB.tx([s]).objectStore(s).getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
-    const all = new Set(); for (const s of ['meta', 'vecs', 'thumbs']) for (const k of await keys(s)) all.add(k);
+    const sets = {}; for (const s of ['meta', 'vecs', 'thumbs']) sets[s] = new Set(await keys(s));
+    const all = new Set([...sets.meta, ...sets.vecs, ...sets.thumbs]);
     const dead = [...all].filter((id) => !L.meta.has(id) && !Indexer.queued.has(id) && (!onlyFolder || id.startsWith(onlyFolder + ':')));
-    if (dead.length) { await DB.removeItems(dead); if (typeof Prep !== 'undefined' && Prep.forgetVote) for (const id of dead) Prep.forgetVote(id); Log.add('info', 'collected orphan records', dead.length); }
-    return dead.length;
+    if (dead.length) { let gone; if (typeof DB.removeOrphans === 'function') gone = await DB.removeOrphans(dead); else { gone = dead.filter((id) => !(sets.meta.has(id) && sets.vecs.has(id))); if (gone.length) await DB.removeItems(gone); } if (gone.length) { if (typeof Prep !== 'undefined' && Prep.forgetVote) for (const id of gone) Prep.forgetVote(id); Log.add('info', 'collected orphan records', gone.length); } return gone.length; }
+    return 0;
   } catch { return 0; }
 };
 
@@ -763,6 +797,18 @@ const Backup = {
     toast(`Backup downloaded to your Downloads folder as ${name} — keep it somewhere safe.`, 5000);
   },
   async restore(file) {
+    // A restore in flight is a stake the first-token judge counts (R10-DS1):
+    // the legacy branch's early adoption asks what this tab has at stake, and
+    // its list named only the Indexer's work — a tab whose first act is
+    // restoring, its hands still empty, read as an idle tab, so a pre-2.84
+    // erase stamp landing at that moment was adopted as a mint and every
+    // later fence ask compared against the stamp itself. The restore
+    // registers itself here for exactly the span it runs; the count (not a
+    // flag) keeps two overlapping restores honest, and the finally below
+    // clears the registration on every exit — landed, refused, aborted or
+    // thrown. Normal-world restore behaviour is untouched: the registration
+    // is read only by the legacy branch's stake test.
+    if (typeof Indexer !== 'undefined') Indexer.restoring = (Indexer.restoring || 0) + 1;
     try {
       const buf = await file.arrayBuffer(); const u = new Uint8Array(buf);
       if (buf.byteLength < 12 || new TextDecoder().decode(u.subarray(0, 8)) !== 'IRISBAK1') return toast('That is not an Iris backup file.', 5000);
@@ -930,6 +976,7 @@ const Backup = {
       if (failed || failedC || bad || badC || dup) { Log.add('ERR', 'restore partial', failed + failedC + bad + badC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit}${gbit}${wbit}${dbit}${ubit} What did restore is ready to use.`, 9000); }
       else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit}${gbit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
     } catch (e) { Log.add('ERR', 'restore failed', e.message); toast('Could not restore that backup: ' + e.message, 6000); }
+    finally { if (typeof Indexer !== 'undefined') Indexer.restoring = Math.max(0, (Indexer.restoring || 0) - 1); }
   },
   async buildPool() {
     if (this.pool) return;
@@ -975,7 +1022,15 @@ const Backup = {
   collShapeOk(c) { if (Array.isArray(c.ids)) return c.ids.every((x) => typeof x === 'string') ? 'set' : null; if (Array.isArray(c.vec) && c.vec.length === DIM && c.vec.every((v) => typeof v === 'number' && Number.isFinite(v)) && typeof c.z === 'number' && Number.isFinite(c.z)) return 'smart'; return null; },
   // The adoption window belongs to the restore that opened it: once the post-restore check/index
   // has run (Indexer calls this), it closes — it must not stay armed for every future photo.
-  disarm() { if (!this.on) return; this.on = false; this.pool = null; this.left = 0; DB.put('kv', 'adoptPool', false).catch(() => {}); Log.add('info', 'backup adoption window closed'); },
+  // Its durable write carries the caller's generation inside its own transaction (R10-DS2):
+  // both call sites ask the generation in the same breath, but an ask answers for its own
+  // moment — an erase committing after it left this plain put free to close the window the
+  // FRESH world had armed after its own restore. A refused write leaves the fresh world's
+  // flag exactly as it stands (this tab's own window is closed in memory either way); an
+  // 'unjudged' answer — this tab held no token and one appeared in the gap — is re-asked
+  // through the fence and retried once under the judged token, in the put's own chain,
+  // since disarm's callers do not await it.
+  disarm() { if (!this.on) return; this.on = false; this.pool = null; this.left = 0; const gen = typeof Indexer !== 'undefined' ? Indexer.gen : undefined; const pw = DB.put('kv', 'adoptPool', false, gen); if (pw && typeof pw.then === 'function') pw.then(async (r) => { if (r === 'unjudged' && typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && !(await Indexer.genMoved())) { const p2 = DB.put('kv', 'adoptPool', false, Indexer.gen); if (p2 && p2.catch) p2.catch(() => {}); } }).catch(() => {}); Log.add('info', 'backup adoption window closed'); },
   /** spec: {id, name, path, folder, src, file?, getFile?, session?} → true when a backup record was adopted under spec.id. */
   async adopt(spec) {
     if (!this.on) return false;
@@ -1079,14 +1134,29 @@ const Backup = {
 // are counted, and a bound ends the session's attempts): the first failures
 // re-offer exactly as before; at the limit the photo is left alone for the
 // session and the log says so ONCE, plainly; beyond it, neither a re-offer
-// nor another log line. A landed fix clears the count.
+// nor another log line. A landed fix clears the count. The doctrine governs
+// every failure shape (R10-D3): the failures that RESOLVE instead of
+// throwing — a null decode, a refused write — land in the same count
+// through noteFail, below; they used to end the job in silence, outside
+// the doctrine entirely, and stayed missing for the whole session.
 const ThumbFix = {
   q: [], busy: false, missing: null, halted: false, // halted: this tab has been told its index is gone (indexGone / eraseIndex set it) — the fixer stops like the Indexer and the Work service do (R6-D6)
   fails: new Map(), LIMIT: 3, // per-photo failure count this session, and the course limit on re-offers (R9-D3)
   add(id, getFile) { if (getFile && !this.halted) { this.q.push({ id, getFile }); this.run(); } },
   async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile(), id); if (this.halted) break; // told while this decode was parked: the thumbnail is never written into a store this tab no longer owns (R6-D6)
         if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { this.halted = true; this.q.length = 0; Log.add('warn', 'thumbnail fixing stopped: the index was erased in another tab'); break; } // the generation fence at this write too — and the write itself is a single transaction with its existence + generation reads (DB.putThumbIfLive), so not even an erase landing in the old read→write gap can leave an orphan thumbnail in a cleared store (R7-DS1)
-        if (p?.thumb) { const wrote = await DB.putThumbIfLive(id, p.thumb, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (!wrote) continue; this.fails.delete(id); any = true; } } catch (e) { const n = (this.fails.get(id) || 0) + 1; this.fails.set(id, n); if (n < this.LIMIT) { let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} Log.add('warn', 'a thumbnail was not fixed or saved — the photo will be offered again at the next folder check', nm, e?.message || String(e)); if (this.missing) this.missing.add(id); } else if (n === this.LIMIT) { let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} Log.add('warn', 'a thumbnail could not be fixed or saved after ' + this.LIMIT + ' tries — it will not be offered again until Iris is reopened', nm, e?.message || String(e)); } } } this.busy = false; if (any) UI.refreshLight(); },
+        if (p?.thumb) { const wrote = await DB.putThumbIfLive(id, p.thumb, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (wrote) { this.fails.delete(id); any = true; } else this.noteFail(id, 'the thumbnail could not be saved'); } else this.noteFail(id, Prep.lastErr || 'the photo could not be decoded'); } catch (e) { this.noteFail(id, e?.message || String(e)); } } this.busy = false; if (any) UI.refreshLight(); },
+  // The failure doctrine, stated once (R10-D3): a failure that THROWS was
+  // always counted, spoken and re-offered under the limit — but two failure
+  // shapes never throw. Prep.run can RESOLVE null (the decoder gave the
+  // photo up: a silent HEIC library, an unreadable file) and the write can
+  // RESOLVE false (the record or the generation moved inside its own
+  // transaction), and both used to end the job in silence — no count, no log
+  // line, and no return to `missing`, whose only way back in was this
+  // function's re-add; since buildMissing computes that set once per
+  // session, the skip was final until Iris reopened. Both faces now land
+  // here, in the same count, the same words and the same bound as a throw.
+  noteFail(id, msg) { const n = (this.fails.get(id) || 0) + 1; this.fails.set(id, n); let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} if (n < this.LIMIT) { Log.add('warn', 'a thumbnail was not fixed or saved — the photo will be offered again at the next folder check', nm, msg); if (this.missing) this.missing.add(id); } else if (n === this.LIMIT) { Log.add('warn', 'a thumbnail could not be fixed or saved after ' + this.LIMIT + ' tries — it will not be offered again until Iris is reopened', nm, msg); } },
   async buildMissing() { if (this.missing) return; try { const keys = await new Promise((res, rej) => { const q = DB.tx(['thumbs']).objectStore('thumbs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); const have = new Set(keys); this.missing = new Set(L.ids.filter((id) => !have.has(id))); } catch { this.missing = new Set(); } },
 };
 
@@ -1850,6 +1920,7 @@ const Indexer = {
   queue: [], queued: new Set(), removed: new Set(), running: false, paused: false, done: 0, total: 0, skipped: 0, t0: 0, cur: '', wake: null,
   epoch: 0, inflight: false, // Erase's fence (R2-DS1): eraseIndex bumps the epoch and waits out inflight before clearing
   gen: undefined, // the durable index generation this tab has learned (R5-D3): eraseIndex stamps a fresh token into kv after its clear, so an erase in ANOTHER tab — invisible to this page's epoch, tombstones and pause — still moves a value every writer can check. undefined = not learned yet; null = no token could be learned or stamped at boot (the store refused) — boot otherwise ensures a token exists, so a cleared store never again reads as the virgin one a null-learned tab began under (R6-P2). A null-learned tab judges the first token that later appears through judgeFirstToken (R8-D1): a first mint is adopted, never mistaken for an erase.
+  restoring: 0, // Backup.restore's in-flight count (R10-DS1): a restore running in this tab is a stake judgeFirstToken's legacy branch counts — the restore registers itself here, because to the old test a restoring tab looked exactly like an idle one
   scanning: '', found: 0,
   speed: localStorage.getItem('iris.speed') || 'gentle', // gentle: AI uses ~25% of the GPU, balanced ~50%, fast 100%
   REST: { gentle: 3, balanced: 1, fast: 0 },
@@ -2000,8 +2071,16 @@ const Indexer = {
     // own restore, clear the fresh world's flag, and announce "Done." over
     // the erased world. The generation is asked at the exit, before any of
     // it: a moved one stands the run down exactly as the deadGen exit does.
+    // And the bookkeeping writes themselves now carry the generation inside
+    // their own transactions (R10-DS2): the ask answered for the moment its
+    // transaction read, and an erase committing in the one-transaction gap
+    // after it was invisible to a plain put — the stale run still closed the
+    // fresh world's window and cleared its flag, over an honest "not moved".
+    // A refusal at the pendingScan write stands the run down at the write,
+    // exactly as the ask does; the disarm's put carries the generation the
+    // same way, inside Backup.disarm itself.
     if (await this.genMoved()) { this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI.renderIndex(); if (typeof indexGone === 'function') indexGone(); return; }
-    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { DB.put('kv', 'pendingScan', false); UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
+    this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { let pw = await DB.put('kv', 'pendingScan', false, this.gen); if (pw === 'unjudged') pw = (await this.genMoved()) ? false : await DB.put('kv', 'pendingScan', false, this.gen); if (pw === false || pw === 'unjudged') { UI.renderIndex(); if (typeof indexGone === 'function') indexGone(); return; } UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
     Backup.disarm(); // a completed indexing run also closes the post-restore adoption window
     Junk.cache = null; Junk.epoch++; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
     toast(`Done. ${fmtN(L.count)} photos ready to search.` + (this.skipped ? ` ${fmtN(this.skipped)} couldn’t be read.` : ''), 4500);
@@ -2040,18 +2119,33 @@ const Indexer = {
   // re-added folder is minted a fresh id — so a held folder standing in the
   // store proves no clear has run since it was written, and every held
   // folder gone proves one has (a restore re-installs photo records under
-  // their original ids verbatim; it resurrects no folder). Photo records
-  // are the fallback witness, with their known bound: after a recovery-door
-  // erase plus a restore, a tab holding records but NO folders can still be
-  // fooled by the recurrence — that is the honest bound of this judgement,
-  // and it is why the marks exist. An UNMARKED token keeps the old stake
-  // width — work in flight counts, and a pure-work stake over a store
-  // holding none of it still accuses: an unmarked token's kind cannot be
-  // read, the verdict stays conservative (a false word heals at a reload; a
-  // job landed in a fresh index does not), and the window closes as every
-  // tab comes to run 2.84 and every new token is marked. Returns true only
-  // for a real move.
-  async judgeFirstToken(cur) { if (cur === null) return false; if (cur.startsWith('e:')) return true; let holds = false, holdsF = false; try { holds = typeof L !== 'undefined' && !!L.count; } catch {} try { holdsF = typeof L !== 'undefined' && !!L.folders && !!L.folders.size; } catch {} if (cur.startsWith('m:')) { if (!holds && !holdsF) { this.gen = cur; return false; } } else if (!holds && !holdsF && !this.running && !this.scanning && !this.inflight) { this.gen = cur; return false; } if (holdsF) { for (const fid of [...L.folders.keys()].slice(0, 3)) { try { if (await DB.get('folders', fid)) { this.gen = cur; return false; } } catch {} } return true; } if (holds) { for (const id of L.ids.slice(0, 3)) { try { if (await DB.get('meta', id)) { this.gen = cur; return false; } } catch {} } return true; } return true; },
+  // their original ids verbatim; it resurrects no folder). The witness is
+  // asked over the WHOLE held set (R10-D2): it used to sample the first
+  // three folders and the first three records, so a tab whose first three
+  // folders another tab had removed one at a time — an ordinary tidy-up,
+  // no clear anywhere — was accused while its fourth folder stood unasked
+  // in the store; removals of some folders while others stand are removals,
+  // never a clear, and every held folder and record is now heard before a
+  // clear is called. The folders-first order itself stands, with its
+  // stated cost: when EVERY held folder is gone, the verdict is a clear
+  // even over standing records — a one-at-a-time removal of every folder
+  // produces exactly the store an erase-plus-restore produces, the two
+  // cannot be told apart from inside it, and the safe direction governs
+  // (a false word heals at a reload). Photo records are the fallback
+  // witness, with their known bound: after a recovery-door erase plus a
+  // restore, a tab holding records but NO folders can still be fooled by
+  // the recurrence — that is the honest bound of this judgement, and it is
+  // why the marks exist. An UNMARKED token keeps the old stake width —
+  // work in flight counts, a restore in flight counts too (R10-DS1: the
+  // restore registers itself on the Indexer, because a restoring tab whose
+  // hands are still empty is otherwise indistinguishable from an idle one,
+  // and a legacy erase stamp landing at that moment was adopted as a mint),
+  // and a pure-work stake over a store holding none of it still accuses:
+  // an unmarked token's kind cannot be read, the verdict stays
+  // conservative (a false word heals at a reload; a job landed in a fresh
+  // index does not), and the window closes as every tab comes to run 2.84
+  // and every new token is marked. Returns true only for a real move.
+  async judgeFirstToken(cur) { if (cur === null) return false; if (cur.startsWith('e:')) return true; let holds = false, holdsF = false; try { holds = typeof L !== 'undefined' && !!L.count; } catch {} try { holdsF = typeof L !== 'undefined' && !!L.folders && !!L.folders.size; } catch {} if (cur.startsWith('m:')) { if (!holds && !holdsF) { this.gen = cur; return false; } } else if (!holds && !holdsF && !this.running && !this.scanning && !this.inflight && !this.restoring) { this.gen = cur; return false; } if (holdsF) { for (const fid of L.folders.keys()) { try { if (await DB.get('folders', fid)) { this.gen = cur; return false; } } catch {} } return true; } if (holds) { for (const id of L.ids) { try { if (await DB.get('meta', id)) { this.gen = cur; return false; } } catch {} } return true; } return true; },
   // Has the durable index generation moved since this tab learned it? (R5-D3) The
   // first call learns the current generation and answers no; later calls compare.
   // A tab whose boot could learn NO token (gen === null, the store refused)
