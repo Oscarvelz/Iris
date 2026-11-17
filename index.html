@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.72';
+const VER = 'Iris 2.73';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1791,7 +1791,7 @@ const Junk = {
 
 /* ---------------- Duplicates ---------------- */
 const Dups = {
-  thr: .94, groups: null,
+  thr: .94, groups: null, run: 0,
   // This parse runs while the module is being evaluated, before boot — an unguarded
   // throw here is the one failure bootRecovery can never reach, a blank page with no
   // surface and no explanation (R5-D8). Every other stored-JSON read in the app is
@@ -1811,19 +1811,29 @@ const Dups = {
     // from ONE world — never welded from two — and the record reads below are
     // guarded besides, so a record a swap took can never throw here. A pass over
     // 400 photos or fewer has no yield and cannot be interrupted at all.
+    // And a run generation over the whole find (R5-I5): L.ver cannot see plain
+    // appends (by design — every captured row stays valid), so two OVERLAPPING runs
+    // both stayed "valid" and the older one's tail store won, erasing pairs the
+    // newer run had already grouped. Each invocation takes the next generation: a
+    // run that finds itself superseded at a yield hands back the standing store,
+    // and only the latest run ever stores.
+    const run = ++this.run;
     for (;;) {
       const v0 = L.ver;
       const ids = L.live().sort((a, b) => L.meta.get(a).mtime - L.meta.get(b).mtime); const n = ids.length; const par = ids.map((_, i) => i);
       const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; }; const u = (a, b) => { a = f(a); b = f(b); if (a !== b) par[b] = a; };
       const W = 40, M = L.mat, rows = ids.map((id) => L.rows.get(id) * DIM);
       let moved = false;
-      for (let i = 0; i < n; i++) { for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); } if (i % 400 === 399) { await sleep(0); if (L.ver !== v0) { moved = true; break; } } }
+      for (let i = 0; i < n; i++) { for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); } if (i % 400 === 399) { await sleep(0); if (run !== this.run) return this.groups; if (L.ver !== v0) { moved = true; break; } } }
       if (moved) continue;
       const byHash = new Map(); ids.forEach((id, i) => { const d = L.meta.get(id)?.dh; if (!d) return; if (byHash.has(d)) u(byHash.get(d), i); else byHash.set(d, i); });
       const gm = new Map(); ids.forEach((id, i) => { if (!L.meta.has(id)) return; const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
       let maxSharp = 1; for (const id of ids) maxSharp = Math.max(maxSharp, L.meta.get(id)?.sharp || 0);
-      this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|'), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id)?.size || 0), 0) }; })
+      const gs = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|'), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id)?.size || 0), 0) }; })
         .filter((g) => !this.dismissed.has(g.key) && !this.dismissed.has(g.key.slice(0, 300))).sort((a, b) => b.ids.length - a.ids.length);
+      // The store belongs to the latest run only (R5-I5): a superseded run that
+      // reaches the tail computes its groups and drops them, never overwriting.
+      if (run === this.run) this.groups = gs;
       return this.groups;
     }
   },
@@ -1848,7 +1858,11 @@ async function saveCollDialog(preIds) {
   const name = await prompt2('Name this collection', preIds ? 'e.g. Managua favorites' : (S.text || 'My collection'), preIds ? '' : (S.text || ''));
   if (!name) return;
   const c = { id: 'c' + Date.now().toString(36), name, at: Date.now() };
-  if (preIds) { c.type = 'set'; c.ids = [...preIds]; } else { if (!S.q) return; c.type = 'smart'; c.vec = [...S.q]; c.z = 2.0; c.text = S.text; }
+  // A set collection is born from the ids as they stand at the WRITE, not as the
+  // caller captured them (R5-I4): the name prompt above is user-paced, and a record
+  // can die while it stands — the check lives here, in the operation, not in the
+  // callers. If nothing the caller named still exists, no collection is created.
+  if (preIds) { const live = preIds.filter((id) => L.meta.has(id)); if (!live.length) { toast('Those photos are no longer in Iris — the collection was not created.'); return; } c.type = 'set'; c.ids = live; } else { if (!S.q) return; c.type = 'smart'; c.vec = [...S.q]; c.z = 2.0; c.text = S.text; }
   await DB.put('colls', c.id, c); L.colls.set(c.id, c); renderSearchChips(); toast(`Saved “${name}”` + (c.type === 'smart' ? '. It updates itself as you add photos.' : '.'));
 }
 async function addToColl(ids) {
@@ -1858,8 +1872,12 @@ async function addToColl(ids) {
   // whole session — every surface treating the photos as added, a later unrelated save
   // of the same collection quietly making the unconfirmed ids durable — while the
   // store never recorded them. Now a failure changes nothing, and says so.
+  // The ids are likewise revalidated at the write (R5-I4): the sheet stands open
+  // user-paced time after any caller-side check, and a record dying in between was
+  // persisted as a ghost member under a false "Added N". The tap adds only what
+  // still exists, and the toast counts exactly that.
   const sets = [...L.colls.values()].filter((c) => c.type === 'set');
-  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { const nc = { ...c, ids: [...new Set([...c.ids, ...ids])] }; try { await DB.put('colls', c.id, nc); } catch (e) { toast('Couldn’t save that change — storage may be full. The collection was not changed.', 4500); throw e; } c.ids = nc.ids; Modal.close(); toast(`Added ${ids.length} to ${c.name}`); } }, '★ ' + c.name)),
+  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { const live = ids.filter((id) => L.meta.has(id)); if (!live.length) { Modal.close(); toast('Those photos are no longer in Iris — nothing was added.'); return; } const nc = { ...c, ids: [...new Set([...c.ids, ...live])] }; try { await DB.put('colls', c.id, nc); } catch (e) { toast('Couldn’t save that change — storage may be full. The collection was not changed.', 4500); throw e; } c.ids = nc.ids; Modal.close(); toast(`Added ${live.length} to ${c.name}`); } }, '★ ' + c.name)),
     h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(); saveCollDialog(ids); } }, '+ New collection')));
 }
 const SUGG_DECOY = ['a portrait photo of a person', 'a product photo of an object on a white background', 'a document, card or text on paper', 'a screenshot of a phone screen', 'a wristwatch or jewelry', 'an empty room with no people in it', 'a close-up of a hand', 'a plain wall or floor with nothing on it'];
@@ -1930,10 +1948,16 @@ async function renderColl() {
   const cards = h('div', { class: 'cards' }); body.append(cards);
   const lastQ = SUGGEST[SUGGEST.length - 1][2]; const lastPrompt = lastQ[lastQ.length - 1];
   if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + lastPrompt))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
-  const sKey = L.count + ':' + L.live().length;
+  // The key carries Junk's epoch as its third component (R5-S1): a status flip moves
+  // neither L.count nor — when a bin and a restore compensate — the live count, so a
+  // key built from those two alone cannot tell a pre-flip world from a post-flip one.
+  // setStatus bumps Junk.epoch on EVERY flip, compensated or not, so the epoch is the
+  // one signal that always moves when the scored set's membership does.
+  const sKey = L.count + ':' + L.live().length + ':' + Junk.epoch;
   let shown = Sugg.cache;
   if (!Sugg.cache || Sugg.cache.n !== sKey) {
     const v0 = L.ver; // the world this count starts from (R4-I3)
+    const ep0 = Junk.epoch; // and its status epoch (R5-S1)
     const ids = L.live(); const total = ids.length;
     const counting = h('div', { class: 'card' }, h('p', {}, 'Counting your photos in every category…')); cards.append(counting);
     const cats = [];
@@ -1958,7 +1982,12 @@ async function renderColl() {
     // missing — under a key that still matches (count and live count never move in
     // a swap). Junk's discipline, same as its compute: the fresh count is still
     // shown for this visit; it is simply never stored across a swap.
-    if (L.ver === v0) Sugg.cache = fresh;
+    // The guard checks the status epoch too (R5-S1): a compensated pair of flips
+    // inside the count (one counted photo binned, one binned photo restored) leaves
+    // L.ver, the count and the live count all exactly as they were, so the ver-only
+    // guard stored a list scored over the pre-flip world and the key served it
+    // indefinitely. A flip of either kind moves the epoch, and the store is refused.
+    if (L.ver === v0 && Junk.epoch === ep0) Sugg.cache = fresh;
     shown = fresh;
     counting.remove();
   }
@@ -1988,26 +2017,40 @@ const Pick = {
     // 'pre' is a snapshot from an earlier moment: validate it against the library as it is NOW —
     // a photo binned or deleted since must neither be picked nor crash the run (I-101)
     if (src === 'all') ids = L.live(); else if (src === 'pre') ids = (this.pre || []).filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); else if (src.startsWith('f:')) ids = L.live().filter((id) => L.meta.get(id).folder === src.slice(2)); else if (src.startsWith('c:')) ids = await collMembers(L.colls.get(src.slice(2)));
+    // The run spans real awaits (the junk count, the text query, the greedy loop's own
+    // yields), and the app's own writers can retire a record inside any of them — a
+    // folder check dropping a file deleted outside Iris, a folder removal, an adoption
+    // swap. A snapshot believed across an await throws on the unguarded quality read
+    // below or, worse, picks a ghost and persists it (R5-I2). So the candidate list is
+    // revalidated after EVERY await: a photo that died mid-run is simply no longer a
+    // candidate, and the reads that follow only ever meet living records.
+    ids = ids.filter((id) => L.meta.has(id));
     const from = $('#pFrom').value, to = $('#pTo').value;
     if (from) { const t = new Date(from + '-01').getTime(); ids = ids.filter((id) => L.meta.get(id)?.mtime >= t); }
     if (to) { const d = new Date(to + '-01'); d.setMonth(d.getMonth() + 1); ids = ids.filter((id) => L.meta.get(id)?.mtime < d.getTime()); }
-    const jk = await Junk.compute().catch(() => null); if (jk) ids = ids.filter((id) => !jk.jset.has(id));
+    const jk = await Junk.compute().catch(() => null); ids = ids.filter((id) => L.meta.has(id)); if (jk) ids = ids.filter((id) => !jk.jset.has(id));
     if (!ids.length) return toast('No photos match those settings.');
     const K = +$('#pK').value, variety = +$('#pV').value / 100;
     let rel = null; const qt = $('#pQ').value.trim();
-    if (qt) { if (!(await ensureAI())) return; const qv = await queryVec(qt); if (!qv) { const res = $('#pRes'); res.innerHTML = ''; res.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🔍'), h('p', {}, 'That only says what to leave out. Add something to look for as well — try “beach -people”.'))); return; } const sc = scoreAll(qv, ids); const st = stats(sc); rel = Array.from(sc, (s) => 1 / (1 + Math.exp(-(s - st.mean) / st.sd * 1.5))); }
+    if (qt) { if (!(await ensureAI())) return; const qv = await queryVec(qt); if (!qv) { const res = $('#pRes'); res.innerHTML = ''; res.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🔍'), h('p', {}, 'That only says what to leave out. Add something to look for as well — try “beach -people”.'))); return; } ids = ids.filter((id) => L.meta.has(id)); if (!ids.length) return toast('No photos match those settings.'); const sc = scoreAll(qv, ids); const st = stats(sc); rel = Array.from(sc, (s) => 1 / (1 + Math.exp(-(s - st.mean) / st.sd * 1.5))); }
     const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id)?.sharp || 0));
     let base = ids.map((id, i) => { const q = Dups.quality(L.meta.get(id), maxSharp); return rel ? .55 * rel[i] + .45 * q : q; });
     let cand = ids.map((id, i) => ({ id, b: base[i] })); if (cand.length > 4000) { cand.sort((a, b) => b.b - a.b); cand = cand.slice(0, 4000); }
     const maxSim = new Float32Array(cand.length).fill(0); const chosen = []; const used = new Uint8Array(cand.length); const M = L.mat;
+    // The loop yields every ten picks (below), and a candidate can die at a yield: the
+    // scan retires the dead on sight, so a ghost is never chosen — its row read would
+    // be NaN similarities, and its base score alone could still win it a place (R5-I2).
     for (let k = 0; k < Math.min(K, cand.length); k++) {
-      let bi = -1, bv = -1e9; for (let i = 0; i < cand.length; i++) { if (used[i]) continue; const v = cand[i].b - variety * 1.6 * Math.max(0, maxSim[i] - .35); if (v > bv) { bv = v; bi = i; } }
+      let bi = -1, bv = -1e9; for (let i = 0; i < cand.length; i++) { if (used[i]) continue; if (!L.meta.has(cand[i].id)) { used[i] = 1; continue; } const v = cand[i].b - variety * 1.6 * Math.max(0, maxSim[i] - .35); if (v > bv) { bv = v; bi = i; } }
       if (bi < 0) break; used[bi] = 1; chosen.push(cand[bi].id); const o = L.rows.get(cand[bi].id) * DIM;
       for (let i = 0; i < cand.length; i++) { if (used[i]) continue; const p = L.rows.get(cand[i].id) * DIM; let s = 0; for (let d = 0; d < DIM; d++) s += M[o + d] * M[p + d]; if (s > maxSim[i]) maxSim[i] = s; }
       if (k % 10 === 9) await sleep(0);
     }
+    // A pick chosen early can still die at a later yield — the bar, the grid and the
+    // save/share buttons speak only of photos that stand at the end (R5-I2).
+    const picks = chosen.filter((id) => L.meta.has(id));
     const res = $('#pRes'); res.innerHTML = '';
-    res.append(h('div', { class: 'bar' }, h('span', {}, `Your best ${chosen.length} from ${fmtN(ids.length)} photos`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => saveCollDialog(chosen) }, '★ Save as collection'), h('button', { class: 'btn sm', onclick: () => shareIds(chosen) }, 'Share all')), grid(chosen, { num: true }));
+    res.append(h('div', { class: 'bar' }, h('span', {}, `Your best ${picks.length} from ${fmtN(ids.length)} photos`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => saveCollDialog(picks) }, '★ Save as collection'), h('button', { class: 'btn sm', onclick: () => shareIds(picks) }, 'Share all')), grid(picks, { num: true }));
     res.scrollIntoView({ behavior: 'smooth' });
   },
 };
@@ -2185,14 +2228,20 @@ const Compare = {
        preview Oscar could not take a ✕ off: 'ya no puedo quitar la selección y la X de estas fotos'.
        The arrows remain the way to look at a photo without touching its mark.) */
     g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.verdict(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
-    const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); this.live = false; Modal.close(); } }, 'Keep');
+    // Compare's own closes all take the cancel path (R5-I6): Modal's no-cancel close
+    // ends selection mode — a contract written for selection-driven sheets, whose
+    // completion IS the selbar action's end. Compare is not selection-driven, and a
+    // selection travels under it by design; its buttons closing the no-cancel way
+    // silently discarded the carried selection, while Escape (cancel) preserved it.
+    // Now every way out of Compare treats the selection the same: it is left alone.
+    const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); this.live = false; Modal.close(true); } }, 'Keep');
     const cnt = h('b', { style: 'font-size:15px' }, '');
-    const remBtn = h('button', { class: 'btn danger', onclick: async () => { await this.hooks?.onRemove?.(); this.live = false; Modal.close(); } }, 'Remove');
+    const remBtn = h('button', { class: 'btn danger', onclick: async () => { await this.hooks?.onRemove?.(); this.live = false; Modal.close(true); } }, 'Remove');
     const remWrap = h('span', { style: 'display:none;align-items:center;gap:8px' }, remBtn, cnt);
     this.els = { stage, stageWrap, info, strip, keepBtn, remWrap, remBtn, cnt, prev, next };
     Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Iris marked its picks — grey with a ✕. Tap any photo, big or small, to change the pick. The last word is yours.'),
       stageWrap, info,
-      h('div', { class: 'bar' }, keepBtn, remWrap, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => { this.live = false; Modal.close(); } }, 'Done')), strip), true, () => { this.live = false; });
+      h('div', { class: 'bar' }, keepBtn, remWrap, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => { this.live = false; Modal.close(true); } }, 'Done')), strip), true, () => { this.live = false; });
     this.show();
   },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.g.ids.length) return; this.i = n; this.show(); },
@@ -2224,7 +2273,7 @@ const Compare = {
       // living copy, or close with a word (R3-I1).
       let j = -1; for (let k = this.i + 1; k < this.g.ids.length && j < 0; k++) if (L.meta.has(this.g.ids[k])) j = k;
       for (let k = this.i - 1; k >= 0 && j < 0; k--) if (L.meta.has(this.g.ids[k])) j = k;
-      if (j < 0) { this.live = false; Modal.close(); this.note('That photo is no longer in Iris.'); return; }
+      if (j < 0) { this.live = false; Modal.close(true); this.note('That photo is no longer in Iris.'); return; }
       this.i = j; id = this.g.ids[j]; m = L.meta.get(id);
       this.note('That photo is no longer in Iris — showing the nearest copy that is.');
     }
@@ -2269,7 +2318,13 @@ $('#selbar').addEventListener('click', async (e) => {
   if (a === 'all') { const top = $('#modal').classList.contains('on') ? '#modal' : '.view.on'; [...$$(top + ' .grid')].flatMap((g) => g._ids || []).forEach((id) => Sel.set.add(id)); $$(top + ' .tile').forEach((t) => t.classList.toggle('sel', Sel.set.has(t.dataset.id))); return updSel(); }
   if (!ids.length) return toast('Select some photos first.');
   if (a === 'bin') { if (!(await setStatus(ids, 'trash'))) return; endSel(); UI.refreshLight(); toast(`Moved ${ids.length} to the bin. Open 🗑 at the top to delete them for good.`, 3500); }
-  if (a === 'restore') { if (!(await setStatus(ids, null))) return; endSel(); UI.refreshLight(); if (cur === 'bin') renderBin(); else renderClean(); toast(`Restored ${ids.length}`); }
+  // Restore rebuilds Clean — but never under a standing Compare (R5-I1): the selbar
+  // floats over the modal, so this branch is reachable while Compare edits a row's
+  // marks, and a rebuild would hand the row fresh marks and orphan Compare's set,
+  // silently discarding its verdicts — R4-I7's harm through the one rebuilder its
+  // cure did not reach. The deferred rebuild lands on the next navigation or
+  // refresh, exactly as refreshAll's does.
+  if (a === 'restore') { if (!(await setStatus(ids, null))) return; endSel(); UI.refreshLight(); if (cur === 'bin') renderBin(); else if (!Compare.live) renderClean(); toast(`Restored ${ids.length}`); }
   if (a === 'del') { if (!(await confirmDelete(ids))) return; endSel(); await deleteFromDevice(ids); if (cur === 'bin') renderBin(); }
   if (a === 'coll') addToColl(ids);
   if (a === 'share') shareIds(ids);
@@ -2289,10 +2344,18 @@ async function renderClean() {
     // is one of them, the best LIVE copy takes its place at the head of the copy — star, marks and counts
     // follow it — while the stored group is never rewritten (D-4/I-103).
     const groups = Dups.groups.map((g) => { const ids = g.ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); if (ids.length < 2) return null; let best = g.best; if (!ids.includes(best)) { let bs = -Infinity, nb = null; const mx = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp)); for (const id of ids) { const q = Dups.quality(L.meta.get(id), mx); if (q > bs) { bs = q; nb = id; } } best = nb || ids[0]; ids.splice(ids.indexOf(best), 1); ids.unshift(best); } return { ...g, ids, best }; }).filter((g) => g && g.ids.length > 1 && g.ids[0] === g.best); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
+    // The bulk actions below announce the operation's outcome, never a render-time
+    // snapshot (R5-I3): setStatus silently filters the dead, so a count captured at
+    // render — or before the confirm dialog's own await — parts from the deed
+    // whenever a record dies in between. Each action recounts its ids in the same
+    // synchronous breath as the setStatus call itself (whose own ghost filter runs
+    // in its synchronous head, so the recount cannot diverge from what it acts on),
+    // the dialog promises no count it cannot yet know, and the toast reports the
+    // recount — "N moved" only when N moved. The same discipline guards openJunk.
     body.append(h('div', { class: 'card', style: 'margin-bottom:14px' },
       h('div', { class: 'rowf', style: 'align-items:flex-end' }, h('div', {}, h('div', { class: 'cnt' }, fmtN(groups.length), h('span', { class: 'small' }, ' groups')), h('p', {}, `${fmtN(total)} extra copies` + (bytes ? ` · ${fmtMB(bytes)} to free` : ''))),
         h('div', { class: 'field', style: 'margin:0' }, h('label', {}, 'Match closeness: ', h('b', {}, Math.round(Dups.thr * 100) + '%')), h('input', { type: 'range', min: '86', max: '99', value: String(Math.round(Dups.thr * 100)), onchange: (e) => { Dups.thr = e.target.value / 100; Dups.groups = null; renderClean(); } }))),
-      groups.length ? h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' }, h('button', { class: 'btn pri', onclick: async () => { const ids = groups.flatMap((g) => g.ids.slice(1)); if (await confirm2('Keep the best of every group?', `${ids.length} photos go to the bin. You can review and restore them before anything is deleted.`, 'Move to bin')) { if (!(await setStatus(ids, 'trash'))) return; renderClean(); toast(`${ids.length} moved to the bin`); } } }, '★ Keep best in all groups')) : ''));
+      groups.length ? h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' }, h('button', { class: 'btn pri', onclick: async () => { const ids = groups.flatMap((g) => g.ids.slice(1)); if (await confirm2('Keep the best of every group?', 'The best of every group stays; the other copies go to the bin. You can review and restore them before anything is deleted.', 'Move to bin')) { const live = ids.filter((id) => L.meta.has(id)); if (!(await setStatus(live, 'trash'))) return; renderClean(); toast(live.length ? `${live.length} moved to the bin` : 'Those copies are no longer in Iris — nothing was moved.'); } } }, '★ Keep best in all groups')) : ''));
     if (!groups.length) body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '✨'), h('p', {}, 'No duplicates at this setting.')));
     const list = h('div'); body.append(list); let shown = 0;
     const addG = () => { for (const g of groups.slice(shown, shown + 30)) {
@@ -2345,10 +2408,13 @@ function renderBin() {
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Long-press a photo to pick only some.')));
   body.append(grid(ids, { noTrashStyle: true, loc: true }));
 }
+// The sheet's ids were captured when the Junk card was rendered and can stand open
+// for minutes; the move recounts them at the tap, in the same breath as the call
+// (R5-I3 — see the note in renderClean), so the toast is the deed's count.
 function openJunk(k, ids) {
   const keep = new Set(); const gm = Junk.meta(k);
   Modal.open(h('div', {}, h('h2', {}, gm.icon + ' ' + gm.name), h('p', { class: 'sub' }, 'Everything marked ✕ goes to the bin. Tap a photo to keep it.'),
-    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id)); if (!(await setStatus(go2, 'trash'))) return; Modal.close(); renderClean(); toast(`${go2.length} moved to the bin`); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close(true) }, 'Cancel')),
+    h('div', { class: 'bar' }, h('button', { class: 'btn pri', onclick: async () => { const go2 = ids.filter((id) => !keep.has(id) && L.meta.has(id)); if (!(await setStatus(go2, 'trash'))) return; Modal.close(); renderClean(); toast(go2.length ? `${go2.length} moved to the bin` : 'Those photos are no longer in Iris — nothing was moved.'); } }, 'Move marked to bin'), h('button', { class: 'btn', onclick: () => Modal.close(true) }, 'Cancel')),
     grid(ids, { loc: true, cls: () => ' mark', onTap: (id, t) => { if (keep.has(id)) keep.delete(id); else keep.add(id); t.classList.toggle('mark', !keep.has(id)); } })), true);
 }
 
