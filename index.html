@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.66';
+const VER = 'Iris 2.67';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -690,6 +690,10 @@ const Backup = {
         L.add(m, new Float32Array(vec));
         try { await DB.put('meta', e.m.id, m); await DB.put('vecs', e.m.id, vec); } catch (err) { L.meta.delete(e.m.id); L.rebuild(); throw err; }
         n++; } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
+      // Entries landed: new records arrived and the kept ones had their vectors
+      // replaced under their existing ids. Any Junk result scored across this restore
+      // mixes two worlds, so the swap discipline applies — invalidate, epoch too (R3-I5).
+      if (n && typeof Junk !== 'undefined') { Junk.cache = null; Junk.epoch++; }
       let nc = 0, skippedC = 0, failedC = 0, badC = 0;
       // The collections tail is parsed defensively, entry by entry (R3-D4): a malformed
       // entry is skipped and counted — it must never throw into the outer catch and report
@@ -777,7 +781,7 @@ const Backup = {
       for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { c.ids[i] = m.id; DB.put('colls', c.id, c); } }
       // An identity died and another was born at the same count: the count-keyed Junk and
       // Sugg caches must hear about the swap, the same discipline as setStatus (R2-D3).
-      if (typeof Junk !== 'undefined') Junk.cache = null;
+      if (typeof Junk !== 'undefined') { Junk.cache = null; Junk.epoch++; }
       if (typeof Sugg !== 'undefined') Sugg.cache = null;
       if (spec.session) L.session.set(m.id, file);
       ThumbFix.add(m.id, spec.getFile ?? (async () => file));
@@ -1167,7 +1171,8 @@ function rangeTap(id, i, list, t) {
 function startSel() { if (Sel.on) return; Sel.on = true; $$('.grid').forEach((g) => g.classList.add('selmode')); updSel(); }
 function toggleSel(id, t) { if (Sel.set.has(id)) Sel.set.delete(id); else Sel.set.add(id); t?.classList.toggle('sel', Sel.set.has(id)); updSel(); }
 function endSel() { Sel.on = false; Sel.set.clear(); Sel.anchor = null; if (Sel.range) setRange(false); dragEnd(); $$('.grid').forEach((g) => g.classList.remove('selmode')); $$('.tile.sel').forEach((t) => t.classList.remove('sel')); updSel(); }
-function updSel() { $('#selbar').classList.toggle('on', Sel.on); document.body.classList.toggle('selon', Sel.on);
+function updSel() { for (const id of Sel.set) if (!L.meta.has(id)) Sel.set.delete(id); // records vanish mid-selection (indexer drop, folder removal) and the set is never told — prune here, so the count below only ever names living photos (R3-I4)
+  $('#selbar').classList.toggle('on', Sel.on); document.body.classList.toggle('selon', Sel.on);
   { const nav = $('#nav'); $('#selbar').classList.toggle('low', $('#modal').classList.contains('on') || !nav || !nav.offsetHeight); } $('#selN').textContent = Sel.set.size + ' selected';
   const inBin = cur === 'bin' || (Sel.set.size > 0 && [...Sel.set].every((id) => L.meta.get(id)?.status === 'trash'));
   for (const a of ['like', 'best', 'coll', 'bin']) $(`#selbar [data-a=${a}]`).classList.toggle('hide', inBin);
@@ -1179,7 +1184,7 @@ async function setStatus(ids, status) { const ms = []; for (const id of ids) { c
   // lands, so a failed write (quota) never leaves the UI believing a move that didn't save.
   try { await DB.putMetas(ms.map((m) => ({ ...m, status }))); } catch (e) { Log.add('ERR', 'status change not saved', e.message); toast(`That change didn't save (${e.message}). Nothing was moved.`, 6000); return false; }
   for (const m of ms) m.status = status;
-  Junk.cache = null; // statuses changed, so the live set Junk scored has changed too — its count-keyed cache must not outlive a bin move or a restore (D-3)
+  Junk.cache = null; Junk.epoch++; // statuses changed, so the live set Junk scored has changed too — its count-keyed cache must not outlive a bin move or a restore (D-3); the epoch move also tells a Junk compute still in flight that its world has moved (R3-I5)
   UI.binCount(); return true; }
 
 /* ---------------- Native shell (Iris for Android) ----------------
@@ -1397,7 +1402,7 @@ const Indexer = {
     // A pure-adoption pass arrives here with an empty queue — identities changed without
     // anything being processed — so the caches are dropped here too, not only at the end
     // of a full run below (R2-D3).
-    if (!this.queue.length && !this.scanning) { Junk.cache = null; Sugg.cache = null; UI.indexStatus(''); UI.refreshAll(); return; }
+    if (!this.queue.length && !this.scanning) { Junk.cache = null; Junk.epoch++; Sugg.cache = null; UI.indexStatus(''); UI.refreshAll(); return; }
     if (!(await ensureAI())) { Dups.groups = null; UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
     this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now(); Log.add('info', 'index start', this.queue.length, 'queued');
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
@@ -1432,7 +1437,7 @@ const Indexer = {
     }
     this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { DB.put('kv', 'pendingScan', false); UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
     Backup.disarm(); // a completed indexing run also closes the post-restore adoption window
-    Junk.cache = null; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
+    Junk.cache = null; Junk.epoch++; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
     toast(`Done. ${fmtN(L.count)} photos ready to search.` + (this.skipped ? ` ${fmtN(this.skipped)} couldn’t be read.` : ''), 4500);
   },
   prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file); if (!j.p) j.err = Prep.lastErr || 'decode failed'; } catch (e) { j.err = e.name + ': ' + e.message; j.p = null; } return j; })(); },
@@ -1453,8 +1458,15 @@ async function queryVec(text, imgId) {
 }
 function rocchio(q, pos, neg) {
   if (!pos.size && !neg.size) return q; const o = Float32Array.from(q);
-  const add = (set, w) => { if (!set.size) return; const m = new Float32Array(DIM); for (const id of set) { if (!L.rows.has(id)) continue; const v = L.vec(id); for (let i = 0; i < DIM; i++) m[i] += v[i] / set.size; } for (let i = 0; i < DIM; i++) o[i] += w * m[i]; };
+  const add = (set, w) => { if (!set.size) return; const m = new Float32Array(DIM); let n = 0; for (const id of set) { if (!L.rows.has(id)) continue; n++; const v = L.vec(id); for (let i = 0; i < DIM; i++) m[i] += v[i]; } if (!n) return; for (let i = 0; i < DIM; i++) o[i] += w * m[i] / n; }; // the divisor counts only photos that actually contributed: a tuned photo whose record vanished must not dilute the tuning that remains (R3-I6)
   add(pos, .9); add(neg, -.45); return norm(o);
+}
+/* The tuning sets are never told when a record vanishes either: prune them wherever the
+   claim is printed, so "tuned by N👍" only ever counts photos that still exist and can
+   still tune (R3-I6). rocchio's own divisor counts only contributing photos as well. */
+function pruneTune() {
+  for (const id of S.pos) if (!L.rows.has(id)) S.pos.delete(id);
+  for (const id of S.neg) if (!L.rows.has(id)) S.neg.delete(id);
 }
 let searchSeq = 0;
 async function runSearch() {
@@ -1488,6 +1500,7 @@ function renderSearchChips() {
   for (const t of IDEAS) box.append(h('button', { class: 'chip', onclick: () => { $('#q').value = t; S.img = null; $('#qimg').classList.add('hide'); runSearch(); } }, t));
 }
 function renderSearch() {
+  pruneTune();
   const res = $('#sres'), bar = $('#sbar'); res.innerHTML = ''; bar.innerHTML = '';
   if (!L.count) { res.append(emptyLib()); return; }
   if (!S.q) {
@@ -1520,7 +1533,7 @@ function emptyLib() {
 
 /* ---------------- Junk sweeper ---------------- */
 const Junk = {
-  cache: null,
+  cache: null, epoch: 0,
   groups: {
     screens: { name: 'Screenshots', icon: '📱', p: ['a screenshot of a phone screen', 'a screenshot of an app or website', 'a screenshot of a chat conversation'] },
     docs: { name: 'Receipts & documents', icon: '🧾', p: ['a photo of a receipt', 'a photo of a printed document or form', 'a photo of a page of text', 'a photo of a whiteboard or presentation slide'] },
@@ -1531,6 +1544,14 @@ const Junk = {
   normal: ['a photo of people', 'a selfie', 'a group photo of friends', 'a family photo', 'a landscape photo', 'a photo of food', 'a photo of a pet', 'a photo of a city street', 'a photo of a building', 'a photo of the beach', 'a photo of nature', 'a photo of a car', 'a photo of the sky', 'a photo of an event', 'a photo of a room', 'a photo of a flower'],
   async compute() {
     if (this.cache && this.cache.n === L.count) return this.cache;
+    // The world this run scores is the one standing NOW. The run spans seconds of
+    // awaits, and an adoption swap or a restore can land inside it: the swap nulls the
+    // cache, but the cache is still empty at that moment, so the null is spent and the
+    // in-flight run would store a result scored across two different worlds under a
+    // count key that still matches (R3-I5). Every invalidation therefore also moves
+    // this epoch, and a run that overlapped one hands its result back for this
+    // showing but never stores it.
+    const ep = this.epoch, n0 = L.count;
     const ids = L.live(); const out = {}; for (const k in this.groups) out[k] = [];
     const nv = []; for (const t of this.normal) nv.push(await AI.text(t));
     const gv = {}; for (const [k, g] of Object.entries(this.groups)) { gv[k] = []; for (const t of g.p) gv[k].push(await AI.text(t)); }
@@ -1539,12 +1560,16 @@ const Junk = {
     for (const [k, vs] of Object.entries(gv)) for (const v of vs) { await sleep(0); const s = scoreAll(v, ids); for (let i = 0; i < s.length; i++) if (s[i] > best[i]) { best[i] = s[i]; bestK[i] = k; } }
     for (let i = 0; i < ids.length; i++) { const margin = best[i] - normalMax[i]; if (margin > 0.005) out[bestK[i]].push({ id: ids[i], m: margin }); }
     for (const k in out) out[k].sort((a, b) => b.m - a.m);
-    // blur and dark from pixel stats
-    const sh = ids.map((id) => L.meta.get(id).sharp).sort((a, b) => a - b); const cut = sh[Math.floor(sh.length * .06)] ?? 0;
-    out.blur = ids.filter((id) => { const m = L.meta.get(id); return m.sharp <= Math.min(cut, 60) && m.bright > 25; }).map((id) => ({ id, m: -L.meta.get(id).sharp }));
-    out.dark = ids.filter((id) => L.meta.get(id).bright < 22).map((id) => ({ id, m: -L.meta.get(id).bright }));
+    // blur and dark from pixel stats — over the ids whose records still stand: an
+    // adoption landing mid-compute deletes its candidate's record, and this section
+    // must not throw on the gap (the scoring above only ever reads rows, where a
+    // record-less id scores NaN and is never classified).
+    const standing = ids.filter((id) => L.meta.has(id));
+    const sh = standing.map((id) => L.meta.get(id).sharp).sort((a, b) => a - b); const cut = sh[Math.floor(sh.length * .06)] ?? 0;
+    out.blur = standing.filter((id) => { const m = L.meta.get(id); return m.sharp <= Math.min(cut, 60) && m.bright > 25; }).map((id) => ({ id, m: -L.meta.get(id).sharp }));
+    out.dark = standing.filter((id) => L.meta.get(id).bright < 22).map((id) => ({ id, m: -L.meta.get(id).bright }));
     const jset = new Set(); for (const k in out) out[k].forEach((r) => jset.add(r.id));
-    this.cache = { n: L.count, out, jset }; return this.cache;
+    const res = { n: n0, out, jset }; if (ep === this.epoch && L.count === n0) this.cache = res; return res;
   },
   meta(k) { return this.groups[k] || { blur: { name: 'Blurry', icon: '🌫️' }, dark: { name: 'Too dark', icon: '🌑' } }[k]; },
 };
@@ -1762,7 +1787,7 @@ async function deleteFromDevice(ids) {
   for (const [fid, ms] of byF) { const f = L.folders.get(fid);
     if (!(await Folders.perm(f, 'readwrite', true))) { fail += ms.length; continue; }
     for (const m of ms) { try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
-  await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Dups.groups = null;
+  await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Junk.epoch++; Dups.groups = null;
   UI.refreshAll(); toast((spared ? `${spared} photo${spared === 1 ? ' was' : 's were'} spared — no longer in the bin. ` : '') + (fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : `Deleted ${ok} photo${ok === 1 ? '' : 's'} from your phone.` + (local.length ? ` Removed ${local.length} from Iris.` : '')), 4500);
 }
 
@@ -1812,13 +1837,16 @@ const Viewer = {
     if (u && this.list[this.i] === id) img.src = u;
     for (const k of [1, -1, 2]) { const n = this.list[this.i + k]; if (n) this.warm(n); }
   },
-  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b || this.list[this.i] !== id) return; } const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); $('#vImg').src = u; },
+  // The #vFull handler awaits the original file before calling this, so whatever the
+  // file type, the photo on screen must still be the one the file belongs to when it
+  // lands: the index check the HEIF branch always had, now on every path (R3-I2).
+  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return false; } if (this.list[this.i] !== id) return false; const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); $('#vImg').src = u; return true; },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.show(); },
 };
 $('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.step(-1); $('#vNext').onclick = () => Viewer.step(1);
-$('#vFull').onclick = async () => { const id = Viewer.list[Viewer.i]; const f = await Folders.fileFor(id, true); if (!f) return toast('Couldn’t open the original.'); await Viewer.showFile(f, id); $('#vFull').classList.add('hide'); };
-$('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id); };
-$('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id, true); };
+$('#vFull').onclick = async () => { const id = Viewer.list[Viewer.i]; const f = await Folders.fileFor(id, true); if (!f) return toast('Couldn’t open the original.'); if (await Viewer.showFile(f, id)) $('#vFull').classList.add('hide'); };
+$('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; if (!L.meta.get(id)) { Viewer.show(); return; } Viewer.close(); setImageQuery(id); };
+$('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; if (!L.meta.get(id)) { Viewer.show(); return; } Viewer.close(); setImageQuery(id, true); };
 $('#vColl').onclick = () => addToColl([Viewer.list[Viewer.i]]);
 $('#vShare').onclick = () => shareIds([Viewer.list[Viewer.i]]);
 $('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); if (!m) { Viewer.show(); return; } if (!(await setStatus([id], m.status === 'trash' ? null : 'trash'))) return; toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.list = Viewer.list.filter((x) => x !== id); if (!Viewer.list.length) return Viewer.close(); if (Viewer.i >= Viewer.list.length) Viewer.i = Viewer.list.length - 1; Viewer.show(); };
@@ -1890,15 +1918,33 @@ const Compare = {
     this.show();
   },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.g.ids.length) return; this.i = n; this.show(); },
+  // The rescue's word, same discipline as the Viewer's: an announcement must never
+  // be able to break the rescue itself.
+  note(msg) { try { toast(msg, 3000); } catch {} },
   /* Tapping the stage photo flips ITS mark in place — grey and ✕ come and go on the photo he means,
-     and the view does not move. Marking is the only per-photo act; removing is the bar's Remove. */
-  verdict() { const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); this.show(); },
+     and the view does not move. Marking is the only per-photo act; removing is the bar's Remove.
+     If the current copy's record has vanished, the tap belongs to the rescue, not to a
+     ghost: show() moves to a living copy (or closes), and no mark flips (R3-I1). */
+  verdict() { if (!L.meta.has(this.g.ids[this.i])) { this.show(); return; } const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); this.show(); },
   async show() {
     // Same show-token discipline as the Viewer (R2-I3): rapid ›› stepping interleaves shows,
     // and only the newest may land — otherwise the stage and info show one copy while
     // verdict() flips the mark of another.
     const seq = (this._seq = (this._seq || 0) + 1);
-    const id = this.g.ids[this.i]; const m = L.meta.get(id); if (!m) return; const { stage, stageWrap, info, strip, keepBtn, remWrap, cnt, prev, next } = this.els;
+    let id = this.g.ids[this.i]; let m = L.meta.get(id);
+    if (!m) {
+      // The current copy's record vanished mid-Compare (the indexer dropped a file
+      // deleted outside Iris, its folder was removed). The Viewer has had a rescue
+      // since R2-I5; Compare never got one — it stranded silently on the previous
+      // copy and verdicts landed on the ghost. The same rescue here: the nearest
+      // living copy, or close with a word (R3-I1).
+      let j = -1; for (let k = this.i + 1; k < this.g.ids.length && j < 0; k++) if (L.meta.has(this.g.ids[k])) j = k;
+      for (let k = this.i - 1; k >= 0 && j < 0; k--) if (L.meta.has(this.g.ids[k])) j = k;
+      if (j < 0) { Modal.close(); this.note('That photo is no longer in Iris.'); return; }
+      this.i = j; id = this.g.ids[j]; m = L.meta.get(id);
+      this.note('That photo is no longer in Iris — showing the nearest copy that is.');
+    }
+    const { stage, stageWrap, info, strip, keepBtn, remWrap, cnt, prev, next } = this.els;
     stageWrap.classList.toggle('marked', this.marks.has(id));
     const t = await Thumbs.url(id); if (seq !== this._seq) return; stage.src = t;
     Viewer.full(id).then((u) => { if (u && this.g?.ids[this.i] === id && this.els) stage.src = u; }).catch(() => {});
@@ -1932,7 +1978,7 @@ function confirm2(title, text, okText, danger) { return new Promise((res) => { c
 
 /* ---------------- Selection bar ---------------- */
 $('#selbar').addEventListener('click', async (e) => {
-  const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set];
+  const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set].filter((id) => L.meta.has(id)); // every count, toast and action below speaks only of photos that still exist (R3-I4)
   if (a === 'close') return endSel();
   if (a === 'range') return setRange(!Sel.range);
   if (a === 'all') { const top = $('#modal').classList.contains('on') ? '#modal' : '.view.on'; [...$$(top + ' .grid')].flatMap((g) => g._ids || []).forEach((id) => Sel.set.add(id)); $$(top + ' .tile').forEach((t) => t.classList.toggle('sel', Sel.set.has(t.dataset.id))); return updSel(); }
@@ -1943,7 +1989,7 @@ $('#selbar').addEventListener('click', async (e) => {
   if (a === 'coll') addToColl(ids);
   if (a === 'share') shareIds(ids);
   if (a === 'best') { endSel(); Pick.preset(ids); }
-  if (a === 'like') { if (!(await ensureAI())) return; endSel(); S.pos = new Set(ids); S.neg.clear(); S.img = null; $('#qimg').classList.add('hide'); const acc = new Float32Array(DIM); ids.forEach((id) => { const v = L.vec(id); for (let i = 0; i < DIM; i++) acc[i] += v[i]; }); $('#q').value = ''; go('search'); S.q = norm(acc); const all = L.live(); const sc = scoreAll(S.q, all); const st = stats(sc); S.results = topK(all, sc, 400).map((r) => ({ ...r, z: (r.s - st.mean) / st.sd })).filter((r, i) => i < 24 || r.z > 1.6); S.text = '(like your selection)'; renderSearch(); }
+  if (a === 'like') { if (!(await ensureAI())) return; endSel(); S.pos = new Set(ids); S.neg.clear(); S.img = null; $('#qimg').classList.add('hide'); const acc = new Float32Array(DIM); let any = false; ids.forEach((id) => { if (!L.rows.has(id)) return; any = true; const v = L.vec(id); for (let i = 0; i < DIM; i++) acc[i] += v[i]; }); if (!any) return toast('Those photos are no longer in Iris — there is nothing to match against.'); $('#q').value = ''; go('search'); S.q = norm(acc); const all = L.live(); const sc = scoreAll(S.q, all); const st = stats(sc); S.results = topK(all, sc, 400).map((r) => ({ ...r, z: (r.s - st.mean) / st.sd })).filter((r, i) => i < 24 || r.z > 1.6); S.text = '(like your selection)'; renderSearch(); }
 });
 
 /* ---------------- Clean view ---------------- */
