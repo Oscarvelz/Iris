@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.63';
+const VER = 'Iris 2.64';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -997,13 +997,18 @@ function tile(id, i, list, opts) {
   if (opts.loc) { const pr = isProt(id); t.append(h('span', { class: 'loc' + (pr ? ' prot' : ''), title: locParts(id).join('/') }, (pr ? '🔒 ' : '📁 ') + locLabel(id))); }
   if (opts.path && Paths.on) t.append(h('span', { class: 'loc tiny' }, pathLabel(id)));
   let lp, moved = false, longFired = false;
-  t.addEventListener('pointerdown', (e) => { if (!opts.onTap && !Sel.on) Viewer.warm(id); moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { longFired = true; if (opts.onLong) { opts.onLong(id, t); navigator.vibrate?.(15); } else if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); });
-  t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); } });
-  t.addEventListener('pointerup', () => clearTimeout(lp)); t.addEventListener('pointercancel', () => clearTimeout(lp));
+  const TP = tile.presses || (tile.presses = new Set());
+  t.addEventListener('pointerdown', (e) => { if (!opts.onTap && !Sel.on) Viewer.warm(id); moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { TP.delete(lp); if (t.isConnected === false || !t.parent) return; longFired = true; if (opts.onLong) { opts.onLong(id, t); navigator.vibrate?.(15); } else if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); TP.add(lp); });
+  t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); TP.delete(lp); } });
+  t.addEventListener('pointerup', () => { clearTimeout(lp); TP.delete(lp); }); t.addEventListener('pointercancel', () => { clearTimeout(lp); TP.delete(lp); });
   t.addEventListener('contextmenu', (e) => e.preventDefault());
-  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) { if (Sel.range) return rangeTap(id, i, list, t); Sel.anchor = { list, i }; return toggleSel(id, t); } Viewer.open(list, i); });
+  t.addEventListener('click', () => { if (moved || longFired) return; if (opts.onTap) return opts.onTap(id, t); if (Sel.on) { if (Sel.range) return rangeTap(id, i, list, t); Sel.anchor = { list, i }; return toggleSel(id, t); } if ($('#modal').classList.contains('on')) Modal.close(); Viewer.open(list, i); });
   return t;
 }
+tile.presses = new Set();
+/* A long-press belongs to the screen it started on: any wholesale re-render or view change
+   cancels every pending press, so nothing fires over a screen the press never touched (R2-I6). */
+function cancelTilePresses() { if (!tile.presses) return; tile.presses.forEach((id) => clearTimeout(id)); tile.presses.clear(); }
 /* Smart selection: long-press then drag paints a range (auto-scrolls at the edges);
    in selection mode, long-press another photo selects everything between it and the last one touched. */
 const Drag = { on: false };
@@ -1574,7 +1579,7 @@ const Pick = {
     if (!ids.length) return toast('No photos match those settings.');
     const K = +$('#pK').value, variety = +$('#pV').value / 100;
     let rel = null; const qt = $('#pQ').value.trim();
-    if (qt) { if (!(await ensureAI())) return; const qv = await queryVec(qt); const sc = scoreAll(qv, ids); const st = stats(sc); rel = Array.from(sc, (s) => 1 / (1 + Math.exp(-(s - st.mean) / st.sd * 1.5))); }
+    if (qt) { if (!(await ensureAI())) return; const qv = await queryVec(qt); if (!qv) { const res = $('#pRes'); res.innerHTML = ''; res.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🔍'), h('p', {}, 'That only says what to leave out. Add something to look for as well — try “beach -people”.'))); return; } const sc = scoreAll(qv, ids); const st = stats(sc); rel = Array.from(sc, (s) => 1 / (1 + Math.exp(-(s - st.mean) / st.sd * 1.5))); }
     const maxSharp = Math.max(1, ...ids.map((id) => L.meta.get(id)?.sharp || 0));
     let base = ids.map((id, i) => { const q = Dups.quality(L.meta.get(id), maxSharp); return rel ? .55 * rel[i] + .45 * q : q; });
     let cand = ids.map((id, i) => ({ id, b: base[i] })); if (cand.length > 4000) { cand.sort((a, b) => b.b - a.b); cand = cand.slice(0, 4000); }
@@ -1650,14 +1655,30 @@ const Viewer = {
     return c.p;
   },
   warm(id) { if (L.meta.has(id)) this.full(id).catch(() => {}); },
+  // The rescue's word: an announcement must never be able to break the rescue itself.
+  note(msg) { try { toast(msg, 3000); } catch {} },
   async show() {
-    const id = this.list[this.i]; const m = L.meta.get(id); if (!m) return;
+    // A show token guards every write below: rapid stepping interleaves shows, and only the
+    // newest may touch the screen — otherwise the last thumb to RESOLVE wins it while Move to
+    // bin / Share / Like act on this.i, a photo the user is not looking at (R2-I2).
+    const seq = (this._seq = (this._seq || 0) + 1);
+    let id = this.list[this.i]; let m = L.meta.get(id);
+    if (!m) {
+      // The current photo's record vanished mid-view (the indexer dropped a file deleted
+      // outside Iris, its folder was removed): never strand the viewer on a ghost — move to
+      // the nearest photo that still exists, or close with a word (R2-I5).
+      let j = -1; for (let k = this.i + 1; k < this.list.length && j < 0; k++) if (L.meta.has(this.list[k])) j = k;
+      for (let k = this.i - 1; k >= 0 && j < 0; k--) if (L.meta.has(this.list[k])) j = k;
+      if (j < 0) { this.close(); this.note('That photo is no longer in Iris.'); return; }
+      this.i = j; id = this.list[j]; m = L.meta.get(id);
+      this.note('That photo is no longer in Iris — showing the nearest one that is.');
+    }
     Zoom.reset(false); const c = this.cache.get(id); const img = $('#vImg');
-    if (c?.im && c.url) img.src = c.url; else img.src = await Thumbs.url(id);
+    if (c?.im && c.url) img.src = c.url; else { const t = await Thumbs.url(id); if (seq !== this._seq) return; img.src = t; }
     const d = new Date(m.mtime); $('#vTitle').textContent = `${m.name} · ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })} · ${m.w}×${m.h}` + (m.size ? ' · ' + fmtMB(m.size) : '');
     $('#vBin').textContent = m.status === 'trash' ? 'Restore' : 'Move to bin'; $('#vBin').classList.toggle('danger', m.status !== 'trash');
     $('#vPrev').style.visibility = this.i > 0 ? 'visible' : 'hidden'; $('#vNext').style.visibility = this.i < this.list.length - 1 ? 'visible' : 'hidden';
-    const u = await this.full(id).catch(() => null); $('#vFull').classList.toggle('hide', !!u); $('#vFull').textContent = /\.(heic|heif)$/i.test(L.meta.get(id)?.name || '') ? 'Best view' : 'Full quality';
+    const u = await this.full(id).catch(() => null); if (seq !== this._seq) return; $('#vFull').classList.toggle('hide', !!u); $('#vFull').textContent = /\.(heic|heif)$/i.test(L.meta.get(id)?.name || '') ? 'Best view' : 'Full quality';
     if (u && this.list[this.i] === id) img.src = u;
     for (const k of [1, -1, 2]) { const n = this.list[this.i + k]; if (n) this.warm(n); }
   },
@@ -1670,7 +1691,7 @@ $('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); 
 $('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; Viewer.close(); setImageQuery(id, true); };
 $('#vColl').onclick = () => addToColl([Viewer.list[Viewer.i]]);
 $('#vShare').onclick = () => shareIds([Viewer.list[Viewer.i]]);
-$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); if (!(await setStatus([id], m.status === 'trash' ? null : 'trash'))) return; toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.list = Viewer.list.filter((x) => x !== id); if (!Viewer.list.length) return Viewer.close(); if (Viewer.i >= Viewer.list.length) Viewer.i = Viewer.list.length - 1; Viewer.show(); };
+$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); if (!m) { Viewer.show(); return; } if (!(await setStatus([id], m.status === 'trash' ? null : 'trash'))) return; toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.list = Viewer.list.filter((x) => x !== id); if (!Viewer.list.length) return Viewer.close(); if (Viewer.i >= Viewer.list.length) Viewer.i = Viewer.list.length - 1; Viewer.show(); };
 let sx = null; $('#vPic').addEventListener('pointerdown', (e) => { sx = e.pointerType === 'touch' ? null : e.clientX; }); $('#vPic').addEventListener('pointerup', (e) => { if (sx != null && Math.abs(e.clientX - sx) > 60) Viewer.step(e.clientX < sx ? 1 : -1); sx = null; });
 /* Pinch to zoom, drag to pan, double-tap to zoom in/out; swipe changes photo only when not zoomed. */
 const Zoom = {
@@ -1743,9 +1764,13 @@ const Compare = {
      and the view does not move. Marking is the only per-photo act; removing is the bar's Remove. */
   verdict() { const id = this.g.ids[this.i]; if (this.marks.has(id)) this.marks.delete(id); else this.marks.add(id); this.row?.querySelector(`.tile[data-id="${CSS.escape(id)}"]`)?.classList.toggle('mark', this.marks.has(id)); this.updBin?.(); this.show(); },
   async show() {
+    // Same show-token discipline as the Viewer (R2-I3): rapid ›› stepping interleaves shows,
+    // and only the newest may land — otherwise the stage and info show one copy while
+    // verdict() flips the mark of another.
+    const seq = (this._seq = (this._seq || 0) + 1);
     const id = this.g.ids[this.i]; const m = L.meta.get(id); if (!m) return; const { stage, stageWrap, info, strip, keepBtn, remWrap, cnt, prev, next } = this.els;
     stageWrap.classList.toggle('marked', this.marks.has(id));
-    stage.src = await Thumbs.url(id);
+    const t = await Thumbs.url(id); if (seq !== this._seq) return; stage.src = t;
     Viewer.full(id).then((u) => { if (u && this.g?.ids[this.i] === id && this.els) stage.src = u; }).catch(() => {});
     const d = new Date(m.mtime);
     info.innerHTML = ''; info.append(h('div', { class: 'cmpRoute' }, routeLabel(id)),
@@ -1952,8 +1977,8 @@ const UI = {
   },
   newChip() { if (cur !== 'search' || S.q) return; const shown = $('#sres .grid')?._ids?.length || 0; const n = L.live().length - shown; let c = $('#newChip'); if (n <= 0) { c?.remove(); return; } if (!c) { c = h('button', { id: 'newChip', class: 'chip on', onclick: () => { c.remove(); renderSearch(); $('#main').scrollTop = 0; } }); $('#sbar').append(h('span', { class: 'sp' }), c); } c.textContent = `↻ ${fmtN(n)} new`; },
   binCount() { const n = binIds().length; $('#binN').textContent = n ? (n > 999 ? '999+' : String(n)) : ''; },
-  refreshLight() { if (cur === 'search' && !S.q && !$('#viewer').classList.contains('on') && $('#main').scrollTop < 200) renderSearch(); this.binCount(); },
-  refreshAll() { Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); if (cur === 'bin') renderBin(); this.binCount(); },
+  refreshLight() { cancelTilePresses(); if (cur === 'search' && !S.q && !$('#viewer').classList.contains('on') && $('#main').scrollTop < 200) renderSearch(); this.binCount(); },
+  refreshAll() { cancelTilePresses(); Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); if (cur === 'bin') renderBin(); this.binCount(); },
 };
 UI.renderLib = renderLib;
 async function ensureAI() {
@@ -1970,7 +1995,7 @@ let cur = 'search';
    collection opened into Search goes Back to Collections, and only at the root —
    Search with nothing left to unwind — does Back leave the app. Capped at 30 steps. */
 const NavStack = [];
-function show(v) { cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v)); $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); $('#main').scrollTop = 0;
+function show(v) { cancelTilePresses(); cur = v; $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v)); $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); $('#main').scrollTop = 0;
   if (v === 'search') { if (!S.q) renderSearch(); } if (v === 'clean') renderClean(); if (v === 'coll') renderColl(); if (v === 'pick') renderPickSrc(); if (v === 'lib') renderLib(); if (v === 'bin') renderBin(); }
 function go(v) { if (v !== cur) { NavStack.push(cur); if (NavStack.length > 30) NavStack.shift(); } show(v); }
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
