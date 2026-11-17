@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.96';
+const VER = 'Iris 2.97';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -980,10 +980,32 @@ const Backup = {
       // summary words landed over the recovery sheet. The catch now answers
       // moved — every sibling fence's safe direction — and the restore
       // takes its abort road like any other discoverer of the erase.
+      // An unaskable fence is two facts, not one (R13-I2): that moved
+      // answer is true of the DEAD connection above, but a single request
+      // can also fail against a connection that stands, and that failure
+      // proves nothing about the index. Answered moved, it spoke the
+      // erase word over a live index, stood the tab down, disarmed the
+      // pool and took back records the restore had truly landed —
+      // including a kept record that stood in the library before the
+      // restore ran — over a token that provably never moved. So the
+      // catch now asks WHY the fence is unreadable: no handle, or a
+      // handle that refuses a new transaction, is the dead connection
+      // and still answers moved; a connection that takes a transaction
+      // stands, and the answer is the third one — 'unknown' — on which
+      // the restore stops and asserts nothing (the unknown road below):
+      // no success word, no erase word, no take-back, no stand-down, no
+      // disarm. What it landed before the unanswered ask stands exactly
+      // as it landed; what it had not done stays undone.
       const eraseEp = (typeof Indexer !== 'undefined' && typeof Indexer.epoch === 'number') ? Indexer.epoch : null;
       let gen0 = null; try { const g = await DB.get('kv', 'indexGen'); gen0 = g == null ? null : g; } catch {}
-      const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); const cur = g == null ? null : g; if (gen0 === null) { if (cur === null) return false; const moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(cur) : true; if (!moved) { gen0 = cur; return false; } return true; } return cur !== gen0; } catch { return true; } };
-      const wrote = []; let aborted = false;
+      const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); const cur = g == null ? null : g; if (gen0 === null) { if (cur === null) return false; const moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(cur) : true; if (!moved) { gen0 = cur; return false; } return true; } return cur !== gen0; } catch { try { if (!DB.db) return true; DB.db.transaction(['kv']); return 'unknown'; } catch { return true; } } };
+      const wrote = []; let aborted = false; let unknown = false;
+      // The unknown road's one exit (R13-I2): the stop is logged by name,
+      // the library is re-rendered so what landed is what shows, and ONE
+      // neutral word speaks — it claims neither the success the restore
+      // cannot verify nor the erase it cannot prove, and it leaves every
+      // deed the restore already landed standing exactly as it landed.
+      const stopUnknown = () => { Log.add('warn', 'restore stopped: the index could not be checked', n); UI.binCount(); UI.renderIndex(); if (cur === 'lib') renderLib(); toast('The restore stopped — Iris could not check the index, so it changed nothing further. What was already restored is still there, and you can restore the backup again if you like.', 6000); };
       // What each write left standing, kept beside the ids (R13-DS1): the
       // retractions below must tell this restore's own writes from a fresh
       // world's same-id rebirth, and only content can — a birth's record
@@ -1043,14 +1065,14 @@ const Backup = {
       const keepFromStore = async (stored, vec) => {
         await DB.put('vecs', stored.id, vec); wrote.push(stored.id);
         const keep = { ...stored, fromBak: true }; written.set(stored.id, snap(keep)); // the kept copy is what this write leaves standing, stamped or already so (R13-DS1)
-        if (await erased()) return 'aborted';
+        const erK = await erased(); if (erK === 'unknown') return 'unknown'; if (erK) return 'aborted'; // an unanswered ask mid-keep stops the restore on the unknown road (R13-I2): the vector this keep already wrote stands — it was fenced true when it landed — and no word asserts why the world went quiet
         if (!stored.fromBak) await DB.put('meta', stored.id, keep);
         const mNow = await DB.get('meta', stored.id); const vNow = mNow ? await DB.get('vecs', stored.id) : null;
         if (!mNow || !vNow) { try { await DB.del('meta', stored.id); } catch {} try { await DB.del('vecs', stored.id); } catch {} return 'gone'; }
         L.add(keep, new Float32Array(vec)); return 'kept';
       };
       for (const e of head.entries) { try {
-        if (await erased()) { aborted = true; break; }
+        const er0 = await erased(); if (er0 === 'unknown') { unknown = true; break; } if (er0) { aborted = true; break; }
         // Every entry is validated BEFORE anything is written (R3-D1): its vector must be
         // exactly one model's worth of bytes lying inside the file. A damaged entry is
         // skipped and named — never installed, never counted a success. Before this, a
@@ -1067,7 +1089,7 @@ const Backup = {
         if (local) { // already here — but "here" is decided by the STORE, not by this tab's memory (R5-D1): another tab may have deleted this very record since this tab booted, by adopting it (the swap removes its halves) or by deleting it from the device. The kept path used to write the record back wholesale on memory's say-so — resurrecting a consumed candidate for a second adoption, and a device-deleted photo stamped adoptable. So the store is asked, and only a record the store still holds is kept; the kept copy is the STORE's record (its bin status above all), never this tab's possibly stale one (R2-D4). The keeping itself re-validates at the write (R6-D3, inside keepFromStore).
           const stored = await DB.get('meta', e.m.id);
           if (!stored) { eaten++; Log.add('info', 'restore did not write back a record another tab has removed', e.m.name); continue; } // the store says this record is gone; it is not this restore's to resurrect — and it counts with the removal family (R12-DS2), never as a match: the gone clause states the matched-in cause, and this entry was removed, not matched
-          const kr = await keepFromStore(stored, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; Log.add('info', 'restore did not write back a record another tab removed while it was being kept', e.m.name); continue; } n++; kept++; continue; }
+          const kr = await keepFromStore(stored, vec); if (kr === 'unknown') { unknown = true; break; } if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; Log.add('info', 'restore did not write back a record another tab removed while it was being kept', e.m.name); continue; } n++; kept++; continue; }
         if (trace0.has(e.m.id)) { gone++; continue; } // already matched into this device by an earlier adoption — writing it back would duplicate the adopted photo under the old device's folder (R3-D2). The trace is the copy read once at this restore's start (R6-D11): a candidate consumed mid-restore is caught two ways below — the freshness counter re-reads the trace when any note has landed since, and the store-key branch asks the store about the id itself when the loop reaches it.
         try { const nNow = await DB.get('kv', 'adoptedFromN'); const nN = typeof nNow === 'number' ? nNow : 0; if (nN !== traceN0) { traceN0 = nN; trace0 = await this.adoptedIds(true); if (trace0.has(e.m.id)) { gone++; continue; } } } catch {} // the freshness check (R6-D11): a note landed mid-restore — re-read the trace once, judge this entry against the new copy, and carry the fresh copy forward
         const liveId = liveKeys.get(e.m.name + '|' + e.m.size + '|' + vhash(new Uint8Array(vec)));
@@ -1075,13 +1097,13 @@ const Backup = {
         if (storeKeys0.has(e.m.id)) { // the store held this id when the restore began, though this tab's library never did: decide from the store, live — an adoption or deletion that landed mid-restore has already removed it there, and the entry counts with the removal family (R12-DS2), exactly as the per-entry trace re-read used to conclude (R5-D2's visibility, kept).
           const stored = await DB.get('meta', e.m.id);
           if (!stored) { eaten++; continue; }
-          const kr = await keepFromStore(stored, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; continue; } n++; kept++; continue; }
+          const kr = await keepFromStore(stored, vec); if (kr === 'unknown') { unknown = true; break; } if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; continue; } n++; kept++; continue; }
         // The birth path asks the store too (R6-D1): a record another tab birthed after
         // this tab booted lives in the store but not in this tab's library, and writing
         // the backup's meta over it blind rewound that tab's decisions about it — a bin
         // move above all. If the store holds the id, the entry is kept, not born.
         const storedB = await DB.get('meta', e.m.id);
-        if (storedB) { const kr = await keepFromStore(storedB, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; continue; } n++; kept++; continue; }
+        if (storedB) { const kr = await keepFromStore(storedB, vec); if (kr === 'unknown') { unknown = true; break; } if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { eaten++; continue; } n++; kept++; continue; }
         const m = { ...e.m, fromBak: true }; // brought in by this restore — and only records a restore brought in may be adopted later (R2-D9)
         written.set(e.m.id, snap(m)); // the birth's fingerprint, taken before the write so even the fallback's mid-birth abort is covered (R13-DS1)
         // Born in L BEFORE its first durable write (R3-D7): this tab's own orphan
@@ -1096,7 +1118,7 @@ const Backup = {
         // complete is spared by the sweep's own revalidation (R10-D1). If a write
         // fails, the birth is rolled back out of L and the entry counts as failed.
         L.add(m, new Float32Array(vec));
-        try { if (typeof DB.birthItem === 'function') { await DB.birthItem(m, vec); wrote.push(e.m.id); } else { await DB.put('meta', e.m.id, m); wrote.push(e.m.id); if (await erased()) { aborted = true; break; } await DB.put('vecs', e.m.id, vec); } } catch (err) { L.meta.delete(e.m.id); L.rebuild(); throw err; }
+        try { if (typeof DB.birthItem === 'function') { await DB.birthItem(m, vec); wrote.push(e.m.id); } else { await DB.put('meta', e.m.id, m); wrote.push(e.m.id); const erB = await erased(); if (erB === 'unknown') { unknown = true; break; } if (erB) { aborted = true; break; } await DB.put('vecs', e.m.id, vec); } } catch (err) { L.meta.delete(e.m.id); L.rebuild(); throw err; }
         // The landed birth is re-validated before it is counted (R11-D1), the kept
         // path's discipline (R6-D3): between the write and this count another tab
         // can still remove the record outright — an adoption consumes its halves,
@@ -1110,8 +1132,8 @@ const Backup = {
         // restore's own abort word unspoken for the very event its fence
         // exists to name.
         const bmNow = await DB.get('meta', e.m.id); const bvNow = bmNow ? await DB.get('vecs', e.m.id) : null;
-        if (!bmNow || !bvNow) { if (await erased()) { aborted = true; break; } try { await DB.del('meta', e.m.id); } catch {} try { await DB.del('vecs', e.m.id); } catch {} L.meta.delete(e.m.id); L.rebuild(); eaten++; Log.add('info', 'restore did not keep a record another tab removed while it was being born', e.m.name); continue; }
-        n++; if (await erased()) { aborted = true; break; } } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
+        if (!bmNow || !bvNow) { const erR = await erased(); if (erR === 'unknown') { unknown = true; break; } if (erR) { aborted = true; break; } try { await DB.del('meta', e.m.id); } catch {} try { await DB.del('vecs', e.m.id); } catch {} L.meta.delete(e.m.id); L.rebuild(); eaten++; Log.add('info', 'restore did not keep a record another tab removed while it was being born', e.m.name); continue; } // an 'unknown' at this ask leaves the birth uncounted and uneaten (R13-I2): its pair does not stand whole, but WHY is exactly what could not be learned — nothing is deleted, and nothing is claimed, on unproven evidence
+        n++; const erC = await erased(); if (erC === 'unknown') { unknown = true; break; } if (erC) { aborted = true; break; } } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
       // Entries landed: new records arrived and the kept ones had their vectors
       // replaced under their existing ids. Any Junk result scored across this restore
       // mixes two worlds, so the swap discipline applies — invalidate, epoch too (R3-I5).
@@ -1125,8 +1147,14 @@ const Backup = {
       // entry is skipped and counted — it must never throw into the outer catch and report
       // a landed restore as a total failure, nor cost the photos their adoption window.
       const wroteC = []; const writtenC = new Map(); // each landed collection's written copy, kept for the retractions' content judgement (R13-DS1)
-      if (Array.isArray(head.colls)) for (const pair of head.colls) { if (await erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; const sc = await DB.get('colls', id); if (sc) { skippedC++; if (!L.colls.has(id)) L.colls.set(id, sc); continue; } try { const landed = typeof DB.putCollIfAbsent === 'function' ? await DB.putCollIfAbsent(id, c) : (await DB.put('colls', id, c), true); if (landed) { wroteC.push(id); writtenC.set(id, snap(c)); L.colls.set(id, c); nc++; } else { skippedC++; const sc2 = await DB.get('colls', id); if (sc2 && !L.colls.has(id)) L.colls.set(id, sc2); } } catch { failedC++; } } // "already here" is decided by the STORE, not by this tab's collection set (R6-D2): a collection another tab deleted was counted "already here and kept" on memory's say-so and never written back — absent at the next boot under a success word. The store is asked; a collection it holds is kept (and learned, if this tab lacked it), and one it lacks is written back and counted restored. The write itself is judged inside its own transaction (R13-D1, DB.putCollIfAbsent): the ask can still be overtaken in its breath — a collection another tab lands there STANDS, is learned, and counts as already here, never rewound by the backup's older copy and never counted as this restore's deed.
-      else if (head.colls != null) badC++;
+      if (!unknown && Array.isArray(head.colls)) for (const pair of head.colls) { const erT = await erased(); if (erT === 'unknown') { unknown = true; break; } if (erT) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; const sc = await DB.get('colls', id); if (sc) { skippedC++; if (!L.colls.has(id)) L.colls.set(id, sc); continue; } try { const landed = typeof DB.putCollIfAbsent === 'function' ? await DB.putCollIfAbsent(id, c) : (await DB.put('colls', id, c), true); if (landed) { wroteC.push(id); writtenC.set(id, snap(c)); L.colls.set(id, c); nc++; } else { skippedC++; const sc2 = await DB.get('colls', id); if (sc2 && !L.colls.has(id)) L.colls.set(id, sc2); } } catch { failedC++; } } // "already here" is decided by the STORE, not by this tab's collection set (R6-D2): a collection another tab deleted was counted "already here and kept" on memory's say-so and never written back — absent at the next boot under a success word. The store is asked; a collection it holds is kept (and learned, if this tab lacked it), and one it lacks is written back and counted restored. The write itself is judged inside its own transaction (R13-D1, DB.putCollIfAbsent): the ask can still be overtaken in its breath — a collection another tab lands there STANDS, is learned, and counts as already here, never rewound by the backup's older copy and never counted as this restore's deed.
+      else if (!unknown && head.colls != null) badC++;
+      // The unknown road (R13-I2): the fence could not be read and the
+      // connection stands, so the restore stops here and asserts nothing —
+      // the abort road below belongs to a PROVEN erase, the summary words
+      // further down to a restore that could still verify its world, and
+      // the arming between them to a restore that finished its entries.
+      if (unknown) { stopUnknown(); return; }
       if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2) — and the discoverer stands the foreground down itself (R12-I3): every other discoverer of an erase (the scan, setStatus, Folders, saveCollDialog) calls indexGone() at its own discovery; a restore that simply walked away left the foreground armed in a dead world until the user's next fenced deed tripped a fence there
         try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch {} // the take-back's acts are independent here too (R13-DS2), and every deletion judges content — only this restore's own writes are taken back, never a fresh world's same-id rebirth (R13-DS1)
         for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch {} L.colls.delete(id); }
@@ -1154,7 +1182,8 @@ const Backup = {
       // stands the foreground down itself (R12-I3), as at the abort face
       // above: the retraction is a discovery of the erase, and a discovery
       // that walks away armed is the parity break the round charged.
-      if (await erased()) { this.on = false; this.pool = null;
+      const erF = await erased(); if (erF === 'unknown') { stopUnknown(); return; } // the final ask can go unanswered too (R13-I2): the arming above STANDS — the unknown road disarms nothing, takes nothing back and stands nothing down — and the retraction below belongs only to a proven erase
+      if (erF) { this.on = false; this.pool = null;
         // The retraction's acts are independent (R13-DS2): the disarm is
         // attempted FIRST and on its own — it is the act that makes the
         // abort word true for the next boot — so no failure of the
@@ -1884,7 +1913,7 @@ function tile(id, i, list, opts) {
   if (opts.path && Paths.on) t.append(h('span', { class: 'loc tiny' }, pathLabel(id)));
   let lp, moved = false, longFired = false;
   const TP = tile.presses || (tile.presses = new Set());
-  t.addEventListener('pointerdown', (e) => { if (!opts.onTap && !Sel.on) Viewer.warm(id); moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { TP.delete(lp); if (t.isConnected === false || !t.parent) return; longFired = true; if (opts.onLong) { opts.onLong(id, t); navigator.vibrate?.(15); } else if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); TP.add(lp); });
+  t.addEventListener('pointerdown', (e) => { if (!opts.onTap && !Sel.on) Viewer.warm(id); moved = false; longFired = false; const x = e.clientX, y = e.clientY; t._xy = [x, y]; lp = setTimeout(() => { TP.delete(lp); if (t.isConnected === false || !t.parent) return; if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; longFired = true; if (opts.onLong) { opts.onLong(id, t); navigator.vibrate?.(15); } else if (!opts.onTap) { longSel(id, i, list, t); navigator.vibrate?.(15); } }, 450); TP.add(lp); }); // the fire asks the telling too (R13-I1): this timer fires a DEED — a selection, or Clean's Compare — not a word, so the round-12 fire-time discipline for timer-armed words never enumerated it; indexGone also recalls armed presses outright, and the two layers together keep a press held across the telling from landing in the dead world even if either one is ever bypassed
   t.addEventListener('pointermove', (e) => { if (t._xy && Math.hypot(e.clientX - t._xy[0], e.clientY - t._xy[1]) > 10) { moved = true; clearTimeout(lp); TP.delete(lp); } });
   t.addEventListener('pointerup', () => { clearTimeout(lp); TP.delete(lp); }); t.addEventListener('pointercancel', () => { clearTimeout(lp); TP.delete(lp); });
   t.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -3695,6 +3724,7 @@ function indexGone() {
   // here on, so nothing can re-arm above the sheet. A tab caught mid-Compare
   // or mid-prompt lands in exactly this state.
   try { if (typeof Sel !== 'undefined' && Sel && Sel.on) endSel(); } catch {}
+  try { if (typeof cancelTilePresses === 'function') cancelTilePresses(); } catch {} // armed presses stand down too (R13-I1): a press HELD across the telling stayed armed on its still-standing tile — every re-render and view change recalls presses (R2-I6), but the stand-down re-renders nothing, so the one wholesale change that forgot the recall left the press to fire its deed (a selection over this sheet, or Clean's Compare) into the dead world. The press timer asks the telling at fire time as well, so the invariant rests on neither layer alone
   try { if (typeof Viewer !== 'undefined' && Viewer) Viewer.close(); } catch {}
   try { if (typeof Modal !== 'undefined' && Modal) Modal.closeAll(); } catch {}
   try { const ob = $('#onboard'); if (ob) ob.classList.remove('on'); } catch {} // the onboarding stands down too (R8-I1): a fourth overlay at z-30, above this sheet, that the enumeration above missed — left standing, its welcome flow could still spend the ~440 MB model download over the sheet and re-arm the modal stack (askFolder) in a tab whose world is gone
