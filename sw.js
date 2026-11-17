@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v82';
+const VERSION = 'iris-v83';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
@@ -28,6 +28,31 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+// Is this body plausibly the runtime file that was asked for (R3-P3)? A resolved 200
+// can still carry the WRONG bytes — an edge error page or truncated content under a
+// success status — and round 2's handler cached it over the known-good runtime, so the
+// offline fallback it built was itself poisoned. The runtime is code or WASM, never a
+// document: a response that declares itself HTML, or whose first non-space character
+// opens markup, is not the runtime however it is labelled. Anything we cannot inspect
+// is NOT distrusted on our own failure — the check must never break a healthy update.
+async function plausibleRuntime(res) {
+  try { const ct = res.headers && typeof res.headers.get === 'function' ? (res.headers.get('content-type') || '') : ''; if (/text\/html/i.test(ct)) return false; } catch {}
+  let head = null;
+  try {
+    const body = res.clone().body;
+    if (typeof body === 'string') head = body.slice(0, 512);
+    else if (body && typeof body.getReader === 'function') {
+      const rd = body.getReader(); const dec = new TextDecoder(); let s = '';
+      for (let n = 0; n < 4 && !/\S/.test(s); n++) { const { done, value } = await rd.read(); if (done) break; s += dec.decode(value, { stream: true }); }
+      try { rd.cancel(); } catch {}
+      head = s;
+    }
+  } catch {}
+  if (head === null) { try { if (typeof res.body === 'string') head = res.body.slice(0, 512); } catch {} }
+  if (head === null) return true;
+  return !head.trimStart().startsWith('<');
+}
+
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
@@ -42,7 +67,11 @@ self.addEventListener('fetch', (e) => {
       // outage, or a 404 after a package move, used to be served raw while a good cached
       // runtime sat unused — the fallback now answers on ANY unusable response whenever a
       // cached copy exists, and the error is served only when there is nothing cached.
-      try { const res = await fetch(e.request); if (res.ok) { c.put(e.request, res.clone()); return res; } const hit = await c.match(e.request); if (hit) return hit; return res; }
+      // "Unusable" includes a 200 with the wrong body (R3-P3, plausibleRuntime above):
+      // it is never written over the known-good copy, and the cached copy answers in its
+      // place; with nothing cached the suspect body is served — there is nothing better
+      // — but it is still not cached, so it cannot become the fallback.
+      try { const res = await fetch(e.request); if (res.ok) { if (await plausibleRuntime(res)) { c.put(e.request, res.clone()); return res; } const hit = await c.match(e.request); if (hit) return hit; return res; } const hit = await c.match(e.request); if (hit) return hit; return res; }
       catch { const hit = await c.match(e.request); if (hit) return hit; throw new Error('offline and not cached'); }
     }));
     return;

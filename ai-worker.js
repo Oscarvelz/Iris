@@ -14,13 +14,17 @@ async function modelReader(blob) {
   const c = await caches.open(CACHE);
   const r = await c.match(MAN); if (!r) throw new Error('Model not downloaded');
   const m = await r.json(); let i = 0;
+  // Forget the manifest ONLY if it is still the one this reader captured (R3-P6): a
+  // fromFile swap on the page may have written a newer manifest since; deleting that
+  // one would orphan a good model and force a whole re-download over a race.
+  const forgetIfSame = async () => { try { const r2 = await c.match(MAN); if (!r2) return; const now = await r2.json(); if (JSON.stringify(now) === JSON.stringify(m)) await c.delete(MAN); } catch {} };
   return new ReadableStream({
     async pull(ctl) {
       if (i >= m.parts) return ctl.close();
       const p = await c.match(key(i));
-      if (!p) { await c.delete(MAN); ctl.error(new Error('Part of the model is missing. Download it again.')); return; }
+      if (!p) { await forgetIfSame(); ctl.error(new Error('Part of the model is missing. Download it again.')); return; }
       const buf = await p.arrayBuffer();
-      if (m.sums && m.sums[i] && partSum(buf) !== m.sums[i]) { await c.delete(MAN); ctl.error(new Error('Part of the model failed its integrity check. Download it again.')); return; }
+      if (m.sums && m.sums[i] && partSum(buf) !== m.sums[i]) { await forgetIfSame(); ctl.error(new Error('Part of the model failed its integrity check. Download it again.')); return; }
       ctl.enqueue(new Uint8Array(buf)); i++;
       postMessage({ progress: Math.round(i / m.parts * 100) });
     },
