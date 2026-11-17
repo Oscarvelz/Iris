@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.83';
+const VER = 'Iris 2.84';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -535,8 +535,23 @@ const DB = {
   open() { return new Promise((res, rej) => { const r = indexedDB.open('iris', 1); r.onupgradeneeded = () => { const d = r.result; for (const s of ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); }; r.onsuccess = () => { const d = r.result; this.db = d; this.blockedError = null; d.onversionchange = () => { try { d.close(); } catch {} if (this.db === d) { this.db = null; indexGone(); } }; res(); }; r.onerror = () => rej(r.error); r.onblocked = () => { const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; this.blockedError = e; if (this.onBlocked) { try { this.onBlocked(e); } catch {} } }; }); },
   tx(stores, mode = 'readonly') { if (!this.db) throw new Error('the index is gone — it was erased in another Iris tab; reload Iris'); return this.db.transaction(stores, mode); },
   get(store, key) { return new Promise((res, rej) => { const q = this.tx([store]).objectStore(store).get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
-  put(store, key, val) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-  del(store, key) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  // With a generation given, the write carries its fence inside its own
+  // transaction (R9-DS2): the generation is read and the put/delete issued in
+  // ONE readwrite transaction spanning the store and kv — an erase is itself
+  // one transaction (DB.clear), so it serialises wholly before this one (the
+  // read then sees the fresh token and nothing is written) or wholly after
+  // it (the clear takes the write with everything else). The check-then-write
+  // shape this replaces — await a genMoved ask, then put in a second
+  // transaction — left a one-transaction gap an erase could land in,
+  // invisible to the write. Resolves true when the write landed, false when
+  // the generation the caller named no longer stands, and 'unjudged' when
+  // the caller held no token (gen === null) and a token appeared inside the
+  // gap: that appearance was never judged, so it is neither a landing nor a
+  // move — the caller re-asks (genMoved judges it) and retries. With no
+  // generation given the write is unconditional, exactly as it always was,
+  // and resolves true on completion.
+  put(store, key, val, gen) { return new Promise((res, rej) => { if (gen === undefined) { const t = this.tx([store], 'readwrite'); t.objectStore(store).put(val, key); t.oncomplete = () => res(true); t.onerror = () => rej(t.error); return; } const t = this.tx([store, 'kv'], 'readwrite'); let out = false; const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) { out = true; t.objectStore(store).put(val, key); } else if (gen === null && cur !== null) out = 'unjudged'; }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
+  del(store, key, gen) { return new Promise((res, rej) => { if (gen === undefined) { const t = this.tx([store], 'readwrite'); t.objectStore(store).delete(key); t.oncomplete = () => res(true); t.onerror = () => rej(t.error); return; } const t = this.tx([store, 'kv'], 'readwrite'); let out = false; const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) { out = true; t.objectStore(store).delete(key); } else if (gen === null && cur !== null) out = 'unjudged'; }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
   all(store) { return new Promise((res, rej) => { const out = []; const q = this.tx([store]).objectStore(store).openCursor(); q.onsuccess = () => { const c = q.result; if (c) { out.push([c.key, c.value]); c.continue(); } else res(out); }; q.onerror = () => rej(q.error); }); },
   // With a generation given, the save carries its own fence (R8-DS1): the
   // generation is read and the three puts are issued inside ONE readwrite
@@ -547,8 +562,13 @@ const DB = {
   // resolving, then an erase landing before the commit, leaving one complete
   // record standing in the cleared store — has no gap left to live in.
   // Resolves true only when the record was written; with no generation
-  // given the save is unconditional, as it always was.
-  saveItem(m, thumb, vec, gen) { return new Promise((res, rej) => { const t = this.tx(gen === undefined ? ['meta', 'thumbs', 'vecs'] : ['meta', 'thumbs', 'vecs', 'kv'], 'readwrite'); let wrote = gen === undefined; const put = () => { t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); }; if (gen === undefined) put(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) { wrote = true; put(); } }; } t.oncomplete = () => res(wrote); t.onerror = () => rej(t.error); }); },
+  // given the save is unconditional, as it always was. A refusal is false —
+  // EXCEPT when the caller held no token (gen === null) and a token appeared
+  // inside the save's own gap (R9-D1): that appearance was never judged, so
+  // it is not a move and must not be read as one — the save resolves
+  // 'unjudged' instead, and the loop lets its next genMoved ask judge the
+  // token (adopt or accuse) before any further save rides on it.
+  saveItem(m, thumb, vec, gen) { return new Promise((res, rej) => { const t = this.tx(gen === undefined ? ['meta', 'thumbs', 'vecs'] : ['meta', 'thumbs', 'vecs', 'kv'], 'readwrite'); let wrote = gen === undefined; const put = () => { t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); }; if (gen === undefined) put(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) { wrote = true; put(); } else if (gen === null && cur !== null) wrote = 'unjudged'; }; } t.oncomplete = () => res(wrote); t.onerror = () => rej(t.error); }); },
   swapItem(m, buf, oldId) { return new Promise((res, rej) => { const t = this.tx(['meta', 'vecs', 'thumbs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('vecs').put(buf, m.id); t.objectStore('meta').delete(oldId); t.objectStore('vecs').delete(oldId); t.objectStore('thumbs').delete(oldId); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   putMetas(ms) { return new Promise((res, rej) => { if (!ms.length) return res(); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); for (const m of ms) o.put(m, m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   putMetasIfLive(ms) { return new Promise((res, rej) => { if (!ms.length) return res([]); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); const skipped = []; for (const m of ms) { const q = o.get(m.id); q.onsuccess = () => { if (q.result) o.put(m, m.id); else skipped.push(m.id); }; } t.oncomplete = () => res(skipped); t.onerror = () => rej(t.error); }); },
@@ -758,9 +778,17 @@ const Backup = {
       // here (R5-D3) — so the fence also watches the durable index generation: eraseIndex
       // stamps a fresh token into kv after its clear, and this restore captured the
       // generation it began under. A moved generation, from any tab, aborts the same way.
+      // A restore begun in a TOKENLESS store (gen0 === null) does not compare bare
+      // (R9-D4): the bare comparison read another tab's ordinary first mint as an
+      // erase and aborted a legitimate restore over it, rolling back every write
+      // under a false cause. There the appearance is judged by
+      // Indexer.judgeFirstToken, like every other null-anchored fence — a mint is
+      // adopted (and becomes this restore's gen0, so later asks compare bare),
+      // an erase's stamp still aborts. A restore begun under a learned token
+      // compares bare, exactly as before: a different token there IS a move.
       const eraseEp = (typeof Indexer !== 'undefined' && typeof Indexer.epoch === 'number') ? Indexer.epoch : null;
       let gen0 = null; try { const g = await DB.get('kv', 'indexGen'); gen0 = g == null ? null : g; } catch {}
-      const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); return (g == null ? null : g) !== gen0; } catch { return false; } };
+      const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); const cur = g == null ? null : g; if (gen0 === null) { if (cur === null) return false; const moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(cur) : true; if (!moved) { gen0 = cur; return false; } return true; } return cur !== gen0; } catch { return false; } };
       const wrote = []; let aborted = false;
       // The durable trace of candidates an earlier adoption on THIS device already consumed
       // (R3-D2): their entries must not be written back as phantom duplicates. It is re-read
@@ -1021,7 +1049,7 @@ const Backup = {
       // collection naming the adopted photo while the store's named the dead
       // candidate, silently, for the whole session, the failure visible only
       // as an unhandled rejection this function's own catch could not see.
-      for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { const nc = { ...c, ids: [...c.ids] }; nc.ids[i] = m.id; try { await DB.put('colls', c.id, nc); c.ids = nc.ids; } catch (e) { Log.add('warn', 'adopted, but a collection still names the replaced photo — its update did not save', c.name, e.message); } } }
+      for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { const nc = { ...c, ids: [...c.ids] }; nc.ids[i] = m.id; try { let cw = await DB.put('colls', c.id, nc, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (await genGone()) ? false : await DB.put('colls', c.id, nc, Indexer.gen); if (cw === false || cw === 'unjudged') { Log.add('warn', 'adoption undone at its last step: the index was erased in another tab', spec.name); if (typeof indexGone === 'function') indexGone(); return false; } c.ids = nc.ids; } catch (e) { Log.add('warn', 'adopted, but a collection still names the replaced photo — its update did not save', c.name, e.message); } } } // the rewrite's puts carry the generation inside their own transactions too (R9-DS2): the post-check above guards the swap, but an erase landing inside this loop planted the rewritten collections into the cleared store, where the fresh boot would load them as ghosts naming a record that no longer lives there — a refusal ends the adoption with the same word as the post-check's own path
       // An identity died and another was born at the same count: the count-keyed Junk and
       // Sugg caches must hear about the swap, the same discipline as setStatus (R2-D3).
       if (typeof Junk !== 'undefined') { Junk.cache = null; Junk.epoch++; }
@@ -1042,12 +1070,23 @@ const Backup = {
 // in silence, and stayed missing until the app reopened. The catch now logs
 // the failure with the photo's name, and the id goes back into `missing`, so
 // the next folder check offers the photo again in the same session.
+// The re-offer has a course limit (R9-D3): the medicine was prescribed
+// without one, so a PERMANENTLY unwritable thumbnail — a blob the store
+// refuses on principle, not a full store that later frees space — was
+// re-decoded, re-written and re-logged on every folder check for as long as
+// the app stayed open, churning the capped log the failures are logged for.
+// Failures are now counted per photo (Prep's own doctrine: a photo's deaths
+// are counted, and a bound ends the session's attempts): the first failures
+// re-offer exactly as before; at the limit the photo is left alone for the
+// session and the log says so ONCE, plainly; beyond it, neither a re-offer
+// nor another log line. A landed fix clears the count.
 const ThumbFix = {
   q: [], busy: false, missing: null, halted: false, // halted: this tab has been told its index is gone (indexGone / eraseIndex set it) — the fixer stops like the Indexer and the Work service do (R6-D6)
+  fails: new Map(), LIMIT: 3, // per-photo failure count this session, and the course limit on re-offers (R9-D3)
   add(id, getFile) { if (getFile && !this.halted) { this.q.push({ id, getFile }); this.run(); } },
   async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile(), id); if (this.halted) break; // told while this decode was parked: the thumbnail is never written into a store this tab no longer owns (R6-D6)
         if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { this.halted = true; this.q.length = 0; Log.add('warn', 'thumbnail fixing stopped: the index was erased in another tab'); break; } // the generation fence at this write too — and the write itself is a single transaction with its existence + generation reads (DB.putThumbIfLive), so not even an erase landing in the old read→write gap can leave an orphan thumbnail in a cleared store (R7-DS1)
-        if (p?.thumb) { const wrote = await DB.putThumbIfLive(id, p.thumb, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (!wrote) continue; any = true; } } catch (e) { let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} Log.add('warn', 'a thumbnail was not fixed or saved — the photo will be offered again at the next folder check', nm, e?.message || String(e)); if (this.missing) this.missing.add(id); } } this.busy = false; if (any) UI.refreshLight(); },
+        if (p?.thumb) { const wrote = await DB.putThumbIfLive(id, p.thumb, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (!wrote) continue; this.fails.delete(id); any = true; } } catch (e) { const n = (this.fails.get(id) || 0) + 1; this.fails.set(id, n); if (n < this.LIMIT) { let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} Log.add('warn', 'a thumbnail was not fixed or saved — the photo will be offered again at the next folder check', nm, e?.message || String(e)); if (this.missing) this.missing.add(id); } else if (n === this.LIMIT) { let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} Log.add('warn', 'a thumbnail could not be fixed or saved after ' + this.LIMIT + ' tries — it will not be offered again until Iris is reopened', nm, e?.message || String(e)); } } } this.busy = false; if (any) UI.refreshLight(); },
   async buildMissing() { if (this.missing) return; try { const keys = await new Promise((res, rej) => { const q = DB.tx(['thumbs']).objectStore('thumbs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); const have = new Set(keys); this.missing = new Set(L.ids.filter((id) => !have.has(id))); } catch { this.missing = new Set(); } },
 };
 
@@ -1694,7 +1733,7 @@ const Folders = {
     let same = false; try { same = nh.name === f.handle.name && await nh.isSameEntry(f.handle); } catch {}
     if (!same && nh.name !== f.name) { toast(`That was “${nh.name}”. Pick “${f.name}” to reconnect it.`, 4000); return false; }
     if (await this._erased()) { toast('That folder was not reconnected — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return false; }
-    f.handle = nh; f.name = nh.name; await DB.put('folders', f.id, f); return true;
+    f.handle = nh; f.name = nh.name; let rw = await DB.put('folders', f.id, f, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (rw === 'unjudged') rw = (await this._erased()) ? false : await DB.put('folders', f.id, f, Indexer.gen); if (rw === false || rw === 'unjudged') { toast('That folder was not reconnected — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return false; } return true; // the put carries the generation inside its own transaction (R9-DS2): an erase landing between the ask above and the write is seen by the write itself, not planted past it
   },
   // One sheet, before a scan starts, for every folder that lost access. Nothing pops up once reading has begun.
   // Ask for all folders at once: the requests go out together inside one tap.
@@ -1735,7 +1774,8 @@ const Folders = {
     // into the fresh index the erase created. The check is the object's shared
     // one now (R7-D2).
     if (await this._erased()) { toast('That folder was not added — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
-    await DB.put('folders', f.id, f); L.folders.set(f.id, f); UI.renderLib(); this.pending = [...(this.pending || []), f];
+    let aw = await DB.put('folders', f.id, f, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (aw === 'unjudged') aw = (await this._erased()) ? false : await DB.put('folders', f.id, f, Indexer.gen); if (aw === false || aw === 'unjudged') { toast('That folder was not added — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } // the put carries the generation inside its own transaction (R9-DS2), so an erase landing after the ask cannot be planted past
+    L.folders.set(f.id, f); UI.renderLib(); this.pending = [...(this.pending || []), f];
     this.basket();
   },
   // Android lets a page pick one folder at a time (and never the storage root), so Iris collects several picks
@@ -1744,7 +1784,7 @@ const Folders = {
   // is not the selection's business, so finishing or leaving the basket preserves one.
   basket() {
     const p = this.pending || []; if (!p.length) { Modal.close(true); return; }
-    const chips = h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px' }, ...p.map((f) => h('span', { class: 'chip', style: 'white-space:nowrap' }, '📁 ' + f.name, h('button', { style: 'background:none;border:0;color:inherit;font-size:16px;padding:0 0 0 8px;cursor:pointer', 'aria-label': 'Remove ' + f.name, onclick: async () => { this.pending = p.filter((x) => x !== f); if (!f.lastScan && !L.ids.some((id) => L.meta.get(id)?.folder === f.id)) { if (await this._erased()) { toast('That folder was not removed — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } await DB.del('folders', f.id); L.folders.delete(f.id); UI.renderLib(); } this.basket(); } }, '×'))));
+    const chips = h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px' }, ...p.map((f) => h('span', { class: 'chip', style: 'white-space:nowrap' }, '📁 ' + f.name, h('button', { style: 'background:none;border:0;color:inherit;font-size:16px;padding:0 0 0 8px;cursor:pointer', 'aria-label': 'Remove ' + f.name, onclick: async () => { this.pending = p.filter((x) => x !== f); if (!f.lastScan && !L.ids.some((id) => L.meta.get(id)?.folder === f.id)) { if (await this._erased()) { toast('That folder was not removed — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } let bw = await DB.del('folders', f.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (bw === 'unjudged') bw = (await this._erased()) ? false : await DB.del('folders', f.id, Indexer.gen); if (bw === false || bw === 'unjudged') { toast('That folder was not removed — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } L.folders.delete(f.id); UI.renderLib(); } this.basket(); } }, '×'))));
     Modal.open(h('div', {}, h('h2', {}, p.length === 1 ? '1 folder selected' : p.length + ' folders selected'), h('p', { class: 'sub' }, 'Add every folder you want, then read them all at once. Android opens one folder per pick.'), chips,
       h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { Modal.close(true); this.add(); } }, '+ Add another folder'), h('button', { class: 'btn pri', onclick: () => { Modal.close(true); const q = this.pending; this.pending = []; Indexer.scan(q); } }, p.length === 1 ? 'Read this folder' : 'Read all ' + p.length))));
   },
@@ -1855,8 +1895,17 @@ const Indexer = {
         // So the generation is asked AGAIN in the writing breath — nothing
         // but the put itself follows this ask — and a moved generation stands
         // the scan down here too: no folder write, no success word, no disarm.
+        // And the put itself now carries the generation inside its own
+        // transaction (R9-DS2): the ask and the write used to be two
+        // transactions, and an erase landing between them was invisible to
+        // the write — the folder record was planted into the cleared store
+        // for the fresh tab's next boot to load as if nothing happened. The
+        // fenced put reads the generation again inside the write, so the
+        // erase serialises wholly before it (nothing is written) or wholly
+        // after it (the clear takes the record too); a refusal stands the
+        // scan down at the write, the same word as the asks above.
         if (await this.genMoved()) { Log.add('warn', 'scan stopped after its sweep: the index was erased in another tab', f.name); this.scanning = ''; this.curF = null; if (typeof indexGone === 'function') indexGone(); return; }
-        f.lastScan = Date.now(); f.count = this.found; await DB.put('folders', f.id, f);
+        f.lastScan = Date.now(); f.count = this.found; let fw = await DB.put('folders', f.id, f, this.gen); if (fw === 'unjudged') fw = (await this.genMoved()) ? false : await DB.put('folders', f.id, f, this.gen); if (fw === false || fw === 'unjudged') { Log.add('warn', 'scan stopped at its folder write: the index was erased in another tab', f.name); this.scanning = ''; this.curF = null; if (typeof indexGone === 'function') indexGone(); return; }
       }
       if (!this.removed.has(f.id)) toast(adopted && !fresh ? `${f.name}: ${fmtN(adopted)} photos matched from the backup — nothing to reprocess.` : fresh ? `${f.name}: ${fmtN(fresh)} new photo${fresh === 1 ? '' : 's'} found.` : `${f.name}: checked ${fmtN(this.found)} photos, nothing new.`, 4000);
     }
@@ -1906,10 +1955,11 @@ const Indexer = {
         else if (await this.genMoved()) { deadGen = true; Log.add('warn', 'indexing stopped: the index was erased in another tab', job.base.name); } // the same fence, at the durable generation's width (R5-D3): this tab's epoch cannot see another tab's erase, so the store is asked before every save
         else {
           const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, mtime: job.base.mtime || job.file?.lastModified || Date.now(), status: null, at: Date.now() };
-          let saved = true, refused = false;
-          try { const r = await DB.saveItem(m, job.p.thumb, vec, this.gen); if (r === false) { saved = false; refused = true; } } catch (e) { saved = false; this.skipped++; if (this.skipped <= 5) console.error('Save failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('Iris couldn\u2019t save these photos (' + e.message + '). Storage may be full. Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
+          let saved = true, refused = false, unjudged = false;
+          try { const r = await DB.saveItem(m, job.p.thumb, vec, this.gen); if (r === false) { saved = false; refused = true; } else if (r === 'unjudged') { saved = false; unjudged = true; } } catch (e) { saved = false; this.skipped++; if (this.skipped <= 5) console.error('Save failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('Iris couldn\u2019t save these photos (' + e.message + '). Storage may be full. Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
           if (saved) { L.add(m, vec); this.cur = job.base.id; }
           else if (refused) { deadGen = true; Log.add('warn', 'indexing stopped: the index was erased in another tab', job.base.name); } // the save's own in-transaction fence refused (R8-DS1): the generation moved inside the save itself, so the run stops here exactly as if the check above had seen it — no record landed, and no success word follows
+          else if (unjudged) { Log.add('warn', 'one photo was not saved: the index gained its first marker in another tab while it was being saved — the index is checked again before the next save', job.base.name); } // no token stood when this run's check asked and one stands now (R9-D1): the appearance is not an erase and must not be read as one — the photo simply stays unsaved (a later check offers it again), and the loop's next genMoved ask judges the token for what it is before another save rides on it
         }
         if (deadGen) { this.queue.length = 0; next = null; this.inflight = false; break; } // abandon the run and the prefetched job with it: nothing more is saved, decoded or reported from a world that was erased
         if (rest > 0) await sleep(Math.min(rest, 4000)); // let the GPU breathe so the phone stays smooth
@@ -1920,6 +1970,16 @@ const Indexer = {
       if (L.count <= 12 || (L.count < 60 && this.done % 12 === 0)) UI.refreshLight(); else if (this.done % 10 === 0) UI.newChip();
     }
     if (deadGen) { this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI.renderIndex(); if (typeof indexGone === 'function') indexGone(); return; } // no end-of-run bookkeeping and no success toast: the run's world was erased under it, and the recovery surface carries the word (R5-D3)
+    // The run's NORMAL exit is fenced like the scan's tail (R9-D2): every save
+    // above was fenced, but the bookkeeping below writes too — the disarm
+    // closes the adoption window and the pendingScan put clears the scan
+    // flag — and the run's tail after its last per-save check is seconds wide
+    // (the final job's decode and its rest-sleep), so an erase landing there
+    // let the stale run close a window the FRESH world had armed after its
+    // own restore, clear the fresh world's flag, and announce "Done." over
+    // the erased world. The generation is asked at the exit, before any of
+    // it: a moved one stands the run down exactly as the deadGen exit does.
+    if (await this.genMoved()) { this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI.renderIndex(); if (typeof indexGone === 'function') indexGone(); return; }
     this.running = false; try { await this.wake?.release(); } catch {} this.wake = null; Work.stop(); UI._st = ''; if (!this.queue.length && !this.scanning && !this.paused) { DB.put('kv', 'pendingScan', false); UI.pendingScan = false; } Log.add('info', `index end: ${this.done} done, ${this.skipped} skipped, ${L.count} in library`);
     Backup.disarm(); // a completed indexing run also closes the post-restore adoption window
     Junk.cache = null; Junk.epoch++; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
@@ -1935,18 +1995,42 @@ const Indexer = {
   // null is the ABSENCE of a token, so any token differs from it, and the plain
   // comparison read a virgin store's first honest mint as an erase — the tab
   // was fenced off its own index, told a false "erased in another tab", in a
-  // world where nothing was ever erased. The appearance is judged by what the
-  // tab has at stake instead. With a stake — records held, or work in flight
-  // (a run, a scan, a job in hand: products of the world the tab began under)
-  // — the store is asked whether the held records still stand: standing
-  // records mean the token is a first mint and it is ADOPTED (the
-  // adopt-don't-accuse discipline claimGen itself uses); records gone — or a
-  // stake of pure work over a store that holds none of it — means the token
-  // is an erase's stamp and the move is real (the R5-D3 shape: a job in
-  // flight must never land in the fresh index). A tab with nothing at stake
-  // adopts outright — there was never anything here for an erase to take.
-  // Returns true only for a real move.
-  async judgeFirstToken(cur) { if (cur === null) return false; let holds = false; try { holds = typeof L !== 'undefined' && !!L.count; } catch {} const stake = holds || !!this.running || !!this.scanning || !!this.inflight; if (stake) { let alive = false; if (holds) { for (const id of L.ids.slice(0, 3)) { try { if (await DB.get('meta', id)) { alive = true; break; } } catch {} } } if (!alive) return true; } this.gen = cur; return false; },
+  // world where nothing was ever erased. The appearance is judged, first by
+  // the token's own lineage, then by what the tab has at stake.
+  // THE LINEAGE (R9-DS1): since 2.84 a token carries the mark of the event
+  // that created it — a boot claim mints 'm:' and an erase stamps 'e:' (the
+  // two creation sites, boot and eraseIndex). The mark is a fact no restore
+  // can re-install: a backup carries records and collections, never the
+  // token, so the old witness — "my records stand, therefore no erase
+  // happened" — is no longer the best evidence where a mark speaks. An 'e:'
+  // token standing now was stamped after this tab's tokenless boot (a token
+  // standing AT boot would have been learned, not null), so the erase is a
+  // fact and the move is real, whatever the tab holds. An 'm:' token's last
+  // event was a claim into a tokenless store — but an erase through the
+  // recovery door (deleteDatabase) stamps nothing, and the NEXT boot's claim
+  // re-mints 'm:' over a restored world, so a marked mint is still taken to
+  // the evidence witness below whenever the tab holds anything durable. What
+  // a mint can never be is a reason to accuse a tab whose only stake is work
+  // in flight over an empty store (R9-D1): work over nothing has nothing an
+  // erase could have taken, so against a marked mint, pure work adopts.
+  // THE WITNESS, for a marked mint with a stake and for every unmarked
+  // (pre-2.84) token: folder records are asked BEFORE photo records,
+  // because a folder record cannot recur — backups carry no folders and a
+  // re-added folder is minted a fresh id — so a held folder standing in the
+  // store proves no clear has run since it was written, and every held
+  // folder gone proves one has (a restore re-installs photo records under
+  // their original ids verbatim; it resurrects no folder). Photo records
+  // are the fallback witness, with their known bound: after a recovery-door
+  // erase plus a restore, a tab holding records but NO folders can still be
+  // fooled by the recurrence — that is the honest bound of this judgement,
+  // and it is why the marks exist. An UNMARKED token keeps the old stake
+  // width — work in flight counts, and a pure-work stake over a store
+  // holding none of it still accuses: an unmarked token's kind cannot be
+  // read, the verdict stays conservative (a false word heals at a reload; a
+  // job landed in a fresh index does not), and the window closes as every
+  // tab comes to run 2.84 and every new token is marked. Returns true only
+  // for a real move.
+  async judgeFirstToken(cur) { if (cur === null) return false; if (cur.startsWith('e:')) return true; let holds = false, holdsF = false; try { holds = typeof L !== 'undefined' && !!L.count; } catch {} try { holdsF = typeof L !== 'undefined' && !!L.folders && !!L.folders.size; } catch {} if (cur.startsWith('m:')) { if (!holds && !holdsF) { this.gen = cur; return false; } } else if (!holds && !holdsF && !this.running && !this.scanning && !this.inflight) { this.gen = cur; return false; } if (holdsF) { for (const fid of [...L.folders.keys()].slice(0, 3)) { try { if (await DB.get('folders', fid)) { this.gen = cur; return false; } } catch {} } return true; } if (holds) { for (const id of L.ids.slice(0, 3)) { try { if (await DB.get('meta', id)) { this.gen = cur; return false; } } catch {} } return true; } return true; },
   // Has the durable index generation moved since this tab learned it? (R5-D3) The
   // first call learns the current generation and answers no; later calls compare.
   // A tab whose boot could learn NO token (gen === null, the store refused)
@@ -2213,7 +2297,7 @@ async function saveCollDialog(preIds) {
   // bare await used to reject into four call sites that never catch, and the
   // save died in total silence.
   if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
-  try { await DB.put('colls', c.id, c); } catch (e) { try { Log.add('ERR', 'collection not saved', e.message); } catch {} toast(`That collection didn't save (${e.message}). Nothing was saved.`, 6000); return; }
+  try { let cw = await DB.put('colls', c.id, c, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.put('colls', c.id, c, Indexer.gen); if (cw === false || cw === 'unjudged') { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } } catch (e) { try { Log.add('ERR', 'collection not saved', e.message); } catch {} toast(`That collection didn't save (${e.message}). Nothing was saved.`, 6000); return; } // the put carries the generation inside its own transaction (R9-DS2): an erase landing between the ask above and the write is seen by the write itself
   L.colls.set(c.id, c); renderSearchChips(); toast(`Saved “${name}”` + (c.type === 'smart' ? '. It updates itself as you add photos.' : '.'));
 }
 async function addToColl(ids) {
@@ -2234,7 +2318,7 @@ async function addToColl(ids) {
   // the name prompt that follows the transition must leave the selection standing,
   // exactly as cancelling this sheet itself would.
   const sets = [...L.colls.values()].filter((c) => c.type === 'set');
-  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { const live = ids.filter((id) => L.meta.has(id)); if (!live.length) { Modal.close(true); toast('Those photos are no longer in Iris — nothing was added.'); return; } if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { Modal.close(true); toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } const nc = { ...c, ids: [...new Set([...c.ids, ...live])] }; try { await DB.put('colls', c.id, nc); } catch (e) { toast('Couldn’t save that change — storage may be full. The collection was not changed.', 4500); throw e; } c.ids = nc.ids; Modal.close(); toast(`Added ${live.length} to ${c.name}`); } }, '★ ' + c.name)),
+  Modal.open(h('div', {}, h('h2', {}, 'Add to collection'), ...sets.map((c) => h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px;justify-content:flex-start', onclick: async () => { const live = ids.filter((id) => L.meta.has(id)); if (!live.length) { Modal.close(true); toast('Those photos are no longer in Iris — nothing was added.'); return; } if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { Modal.close(true); toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } const nc = { ...c, ids: [...new Set([...c.ids, ...live])] }; try { let cw = await DB.put('colls', c.id, nc, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.put('colls', c.id, nc, Indexer.gen); if (cw === false || cw === 'unjudged') { Modal.close(true); toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } } catch (e) { toast('Couldn’t save that change — storage may be full. The collection was not changed.', 4500); throw e; } c.ids = nc.ids; Modal.close(); toast(`Added ${live.length} to ${c.name}`); } }, '★ ' + c.name)),
     h('button', { class: 'btn pri', style: 'width:100%', onclick: () => { Modal.close(true); saveCollDialog(ids); } }, '+ New collection')));
 }
 const SUGG_DECOY = ['a portrait photo of a person', 'a product photo of an object on a white background', 'a document, card or text on paper', 'a screenshot of a phone screen', 'a wristwatch or jewelry', 'an empty room with no people in it', 'a close-up of a hand', 'a plain wall or floor with nothing on it'];
@@ -2378,9 +2462,9 @@ async function openColl(c, refresh) {
   // not the selection. (The selbar's own best action ends the selection explicitly,
   // in its handler, because ending it is that action's business; these buttons never
   // declared it, and no longer do it as a side effect of how they close.)
-  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { const z = +e.target.value; if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); openColl(c, true); return; } try { await DB.put('colls', c.id, { ...c, z }); } catch (err) { Log.add('ERR', 'collection strictness not saved', err.message); toast(`That change didn't save (${err.message}). Nothing was changed.`, 6000); openColl(c, true); return; } c.z = z; openColl(c, true); } })) : '';
+  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { const z = +e.target.value; if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); openColl(c, true); return; } try { let cw = await DB.put('colls', c.id, { ...c, z }, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.put('colls', c.id, { ...c, z }, Indexer.gen); if (cw === false || cw === 'unjudged') { toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); openColl(c, true); return; } } catch (err) { Log.add('ERR', 'collection strictness not saved', err.message); toast(`That change didn't save (${err.message}). Nothing was changed.`, 6000); openColl(c, true); return; } c.z = z; openColl(c, true); } })) : '';
   const sheet = h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
-    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(true); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That rename was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { await DB.put('colls', c.id, { ...c, name: nn }); } catch (err) { Log.add('ERR', 'collection rename not saved', err.message); toast(`That rename didn't save (${err.message}). The collection keeps its old name.`, 6000); return; } c.name = nn; openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That collection was not deleted — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { await DB.del('colls', c.id); } catch (err) { toast(`That delete didn't save (${err.message}). The collection is still there.`, 6000); Log.add('ERR', 'collection delete not saved', err.message); return; } L.colls.delete(c.id); Modal.close(true); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
+    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(true); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That rename was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { let cw = await DB.put('colls', c.id, { ...c, name: nn }, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.put('colls', c.id, { ...c, name: nn }, Indexer.gen); if (cw === false || cw === 'unjudged') { toast('That rename was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } } catch (err) { Log.add('ERR', 'collection rename not saved', err.message); toast(`That rename didn't save (${err.message}). The collection keeps its old name.`, 6000); return; } c.name = nn; openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That collection was not deleted — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { let cw = await DB.del('colls', c.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.del('colls', c.id, Indexer.gen); if (cw === false || cw === 'unjudged') { toast('That collection was not deleted — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } } catch (err) { toast(`That delete didn't save (${err.message}). The collection is still there.`, 6000); Log.add('ERR', 'collection delete not saved', err.message); return; } L.colls.delete(c.id); Modal.close(true); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
     grid(ids, { path: true })); if (refresh) Modal.replace(sheet, true); else Modal.open(sheet, true);
 }
 $('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); else { toast('Iris couldn’t search for that — the AI may not be loaded. Nothing was saved.', 4500); go('coll'); } };
@@ -3053,7 +3137,10 @@ async function eraseIndex() {
   // generation token stamped into the cleared store is the one signal every tab's
   // writers can check: restore, the indexer and adoption all compare the generation
   // they began under against the store's, and stand down when it has moved.
-  try { const gen = Date.now().toString(36) + Math.random().toString(36).slice(2); await DB.put('kv', 'indexGen', gen); Indexer.gen = gen; } catch {}
+  // The stamp is MARKED ('e:'): the token itself now states that an erase created it,
+  // a lineage no restore can re-install — a tab that never learned a token judges a
+  // later appearance by it (R9-DS1); boot's claim mints 'm:' the same way.
+  try { const gen = 'e:' + Date.now().toString(36) + Math.random().toString(36).slice(2); await DB.put('kv', 'indexGen', gen); Indexer.gen = gen; } catch {}
   localStorage.removeItem('iris-dismissed');
   // The shell's WorkService is part of the teardown (R4-P5): it stops only on the
   // bridge's workStop, and after the reload the new page's Work starts with bg=false,
@@ -3246,7 +3333,10 @@ function bootRecovery(e) {
   // tab" verdict, with its forced reload, in a world where nothing was erased.
   // From then on a token is absent only inside an erase's own clear→stamp breath,
   // where absent ≠ learned, and every writer stands down.
-  try { let g = await DB.get('kv', 'indexGen'); if (g == null) { const mine = Date.now().toString(36) + Math.random().toString(36).slice(2); try { g = await DB.claimGen(mine); } catch { try { g = await DB.get('kv', 'indexGen'); } catch {} } } Indexer.gen = g == null ? null : g; } catch {}
+  // The mint is MARKED ('m:'): since 2.84 a token carries the lineage of the event that
+  // created it, so a tab that learns it later can tell a first claim from an erase's
+  // stamp (R9-DS1) — eraseIndex's stamp carries 'e:' the same way.
+  try { let g = await DB.get('kv', 'indexGen'); if (g == null) { const mine = 'm:' + Date.now().toString(36) + Math.random().toString(36).slice(2); try { g = await DB.claimGen(mine); } catch { try { g = await DB.get('kv', 'indexGen'); } catch {} } } Indexer.gen = g == null ? null : g; } catch {}
   Backup.on = !!(await DB.get('kv', 'adoptPool'));
   UI.pendingScan = !!(await DB.get('kv', 'pendingScan'));
   { const smp = L.ids.filter((id) => id.startsWith('sample:')); if (smp.length) { await DB.removeItems(smp); smp.forEach((id) => L.meta.delete(id)); L.rebuild(); Log.add('info', 'removed sample photos', smp.length); } } // samples are gone for good
