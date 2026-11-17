@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.93';
+const VER = 'Iris 2.94';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -915,9 +915,18 @@ const Backup = {
       // adopted (and becomes this restore's gen0, so later asks compare bare),
       // an erase's stamp still aborts. A restore begun under a learned token
       // compares bare, exactly as before: a different token there IS a move.
+      // An unaskable fence is not an unerased world (R12-I3): the catch at
+      // the end of erased() used to answer false — "not erased" — when the
+      // database itself could not be read, but a dead connection is
+      // precisely how another tab's erase announces itself inside a restore
+      // (deleteDatabase fires this tab's onversionchange, which closes the
+      // connection), so the restore ground on per entry and its failure and
+      // summary words landed over the recovery sheet. The catch now answers
+      // moved — every sibling fence's safe direction — and the restore
+      // takes its abort road like any other discoverer of the erase.
       const eraseEp = (typeof Indexer !== 'undefined' && typeof Indexer.epoch === 'number') ? Indexer.epoch : null;
       let gen0 = null; try { const g = await DB.get('kv', 'indexGen'); gen0 = g == null ? null : g; } catch {}
-      const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); const cur = g == null ? null : g; if (gen0 === null) { if (cur === null) return false; const moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(cur) : true; if (!moved) { gen0 = cur; return false; } return true; } return cur !== gen0; } catch { return false; } };
+      const erased = async () => { if (eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp) return true; try { const g = await DB.get('kv', 'indexGen'); const cur = g == null ? null : g; if (gen0 === null) { if (cur === null) return false; const moved = typeof Indexer !== 'undefined' && typeof Indexer.judgeFirstToken === 'function' ? await Indexer.judgeFirstToken(cur) : true; if (!moved) { gen0 = cur; return false; } return true; } return cur !== gen0; } catch { return true; } };
       const wrote = []; let aborted = false;
       // The durable trace of candidates an earlier adoption on THIS device already consumed
       // (R3-D2): their entries must not be written back as phantom duplicates. It is re-read
@@ -1054,10 +1063,10 @@ const Backup = {
       const wroteC = [];
       if (Array.isArray(head.colls)) for (const pair of head.colls) { if (await erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; const sc = await DB.get('colls', id); if (sc) { skippedC++; if (!L.colls.has(id)) L.colls.set(id, sc); continue; } try { await DB.put('colls', id, c); wroteC.push(id); L.colls.set(id, c); nc++; } catch { failedC++; } } // "already here" is decided by the STORE, not by this tab's collection set (R6-D2): a collection another tab deleted was counted "already here and kept" on memory's say-so and never written back — absent at the next boot under a success word. The store is asked; a collection it holds is kept (and learned, if this tab lacked it), and one it lacks is written back and counted restored.
       else if (head.colls != null) badC++;
-      if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2)
+      if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2) — and the discoverer stands the foreground down itself (R12-I3): every other discoverer of an erase (the scan, setStatus, Folders, saveCollDialog) calls indexGone() at its own discovery; a restore that simply walked away left the foreground armed in a dead world until the user's next fenced deed tripped a fence there
         try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } } catch {}
         Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length);
-        return toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); }
+        toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
       // Dismissed groups merge in as a union and persist, so they stay dismissed on this
       // device too (R2-D11). Backups from before 2.62 carry no such field — nothing to merge.
       // The persist merges against the CURRENTLY STORED set first (R5-D9): this tab's
@@ -1066,7 +1075,7 @@ const Backup = {
       // Dups.dismiss now guards against at its own write.
       let mergedD = 0;
       if (Array.isArray(head.dismissed)) { try { for (const k of head.dismissed) if (typeof k === 'string' && !Dups.dismissed.has(k)) { Dups.dismissed.add(k); mergedD++; } try { const cur = JSON.parse(localStorage.getItem('iris-dismissed') || '[]'); if (Array.isArray(cur)) for (const k of cur) if (typeof k === 'string') Dups.dismissed.add(k); } catch {} if (mergedD) { if (typeof Dups.persist === 'function') Dups.persist(); else { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed])); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-10000))); } catch {} } } } Log.add('info', 'dismissed groups restored from backup', mergedD); } } catch {} } // the merge persists through Dups.persist itself (R6-D9): the full set is attempted first and the capped slices are only the fallback after a failed full write — restore's private copy of this chain attempted the slice FIRST, silently shedding the oldest dismissals whenever the set stood over the cap, though the full write would have fit. The union read above (the currently stored set merged into memory before the write, R5-D9) stays in this copy as well: persist() performs it again on the production path, and in any world where persist is not at hand the union is still honoured here rather than silently dropped.
-      if (!n && !nc && (failed || bad)) { Log.add('ERR', 'restore failed', firstErr || 'damaged entries'); return toast('Could not restore that backup: ' + (firstErr || 'part of the backup was damaged'), 6000); }
+      if (!n && !nc && (failed || bad)) { Log.add('ERR', 'restore failed', firstErr || 'damaged entries'); if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; return toast('Could not restore that backup: ' + (firstErr || 'part of the backup was damaged'), 6000); } // the completion word asks the telling before it speaks (R12-I3), in the same guarded shape as #fModel's completion: a world that ended under this restore is not told its failure over the recovery sheet
       if (n || nc) { this.on = true; this.pool = null; try { await DB.put('kv', 'adoptPool', true); } catch {} }
       // The completion asks one last time (R12-DS3): every ask above stands
       // before a write, and the arming put is this restore's LAST write — an
@@ -1076,8 +1085,11 @@ const Backup = {
       // spoken, and the arming is not settled, until one final ask has
       // passed; a moved world is treated exactly like the abort faces
       // above — every write taken back, the window disarmed in the store
-      // as well as here, and the abort word spoken.
-      if (await erased()) { this.on = false; this.pool = null; try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } if (n || nc) { try { await DB.put('kv', 'adoptPool', false); } catch {} } } catch {} Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length); return toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); }
+      // as well as here, and the abort word spoken. The discoverer also
+      // stands the foreground down itself (R12-I3), as at the abort face
+      // above: the retraction is a discovery of the erase, and a discovery
+      // that walks away armed is the parity break the round charged.
+      if (await erased()) { this.on = false; this.pool = null; try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } if (n || nc) { try { await DB.put('kv', 'adoptPool', false); } catch {} } } catch {} Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length); toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
       if (gone) Log.add('info', 'restore skipped photos already matched into this device', gone);
       if (badNames.length) Log.add('ERR', 'restore skipped damaged backup entries', badNames.join(', '));
       if (badC) Log.add('ERR', 'restore skipped damaged collection entries', badC);
@@ -1096,9 +1108,15 @@ const Backup = {
       const wbit = (failed || failedC) ? ` ${fmtN(failed + failedC)} item${failed + failedC === 1 ? '' : 's'} could not be written${firstErr ? ` (${firstErr})` : ''}.` : '';
       const dbit = (bad || badC) ? ` ${fmtN(bad + badC)} damaged item${bad + badC === 1 ? '' : 's'} ${bad + badC === 1 ? 'was' : 'were'} skipped${badNames.length ? ` (${badNames.slice(0, 3).join(', ')}${badNames.length > 3 ? ', …' : ''})` : ''}.` : '';
       const ubit = dup ? ` ${fmtN(dup)} duplicate entr${dup === 1 ? 'y' : 'ies'} in the backup named the same photo twice and ${dup === 1 ? 'was' : 'were'} counted once.` : '';
-      if (failed || failedC || bad || badC || dup) { Log.add('ERR', 'restore partial', failed + failedC + bad + badC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit}${gbit}${ebit}${wbit}${dbit}${ubit} What did restore is ready to use.`, 9000); }
-      else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit}${gbit}${ebit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
-    } catch (e) { Log.add('ERR', 'restore failed', e.message); toast('Could not restore that backup: ' + e.message, 6000); }
+      // The summary words ask the telling before they speak (R12-I3), in
+      // the same guarded shape as #fModel's completion: a restore whose
+      // world ended under it finishes its bookkeeping in silence rather
+      // than announcing a summary over the recovery sheet. (The abort
+      // faces above are not this guard's business — theirs is the
+      // discoverer's own word, and they call indexGone() themselves.)
+      if (failed || failedC || bad || badC || dup) { Log.add('ERR', 'restore partial', failed + failedC + bad + badC, firstErr); if (!(typeof indexGoneShown !== 'undefined' && indexGoneShown)) toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit}${gbit}${ebit}${wbit}${dbit}${ubit} What did restore is ready to use.`, 9000); }
+      else if (!(typeof indexGoneShown !== 'undefined' && indexGoneShown)) toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit}${gbit}${ebit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
+    } catch (e) { Log.add('ERR', 'restore failed', e.message); if (!(typeof indexGoneShown !== 'undefined' && indexGoneShown)) toast('Could not restore that backup: ' + e.message, 6000); }
     finally { if (typeof Indexer !== 'undefined') Indexer.restoring = Math.max(0, (Indexer.restoring || 0) - 1); }
   },
   async buildPool() {
@@ -1809,7 +1827,7 @@ function longSel(id, i, list, t) {
   else { startSel(); toggleSel(id, t); }
   Sel.anchor = { list, i };
   Object.assign(Drag, { on: true, list, start: i, cur: i, base: new Set(Sel.set), add: Sel.set.has(id), x: 0, y: 0 });
-  if (!localStorage.getItem('iris.selTip')) { localStorage.setItem('iris.selTip', '1'); setTimeout(() => toast('Tip: keep holding and drag to select many. Long-press another photo to select everything in between.', 5000), 600); }
+  if (!localStorage.getItem('iris.selTip')) { setTimeout(() => { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; if (localStorage.getItem('iris.selTip')) return; localStorage.setItem('iris.selTip', '1'); toast('Tip: keep holding and drag to select many. Long-press another photo to select everything in between.', 5000); }, 600); } // the one-shot flag is spent at the SHOWING, not the scheduling (R12-I2): a timer armed before the stand-down fires into the dead world, and a flag spent at schedule time made that dead showing the tip's only one — the live user never saw it. The fire-time ask keeps the tip silent past the telling and leaves the flag unspent, so it can still show exactly once, in a world where showing means something; the fire-time re-read keeps two presses inside one window from showing it twice
 }
 function paintSel(list) { $$('.view.on .tile, #modal .tile').forEach((t) => { if (!list || t._list === list) t.classList.toggle('sel', Sel.set.has(t.dataset.id)); }); }
 function dragTo(x, y) {
@@ -2189,7 +2207,14 @@ const Indexer = {
     // anything being processed — so the caches are dropped here too, not only at the end
     // of a full run below (R2-D3).
     if (!this.queue.length && !this.scanning) { Junk.cache = null; Junk.epoch++; Sugg.cache = null; UI.indexStatus(''); UI.refreshAll(); return; }
-    if (!(await ensureAI())) { Dups.groups = null; UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
+    // A false from ensureAI is not always a refusal (R12-I1): since 2.91 it
+    // also resolves false when a completion crossed the telling — the world
+    // ended mid-flight — and that false must neither speak the waiting word
+    // nor render over the recovery sheet. The word below belongs to the live
+    // world's refusals alone (the model absent, the download declined); a
+    // telling-crossed false returns in silence, the stand-down already done
+    // by whoever discovered the erase.
+    if (!(await ensureAI())) { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; Dups.groups = null; UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
     this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now(); Log.add('info', 'index start', this.queue.length, 'queued');
     if (await this.genMoved()) { this.running = false; if (typeof indexGone === 'function') indexGone(); UI.renderIndex(); return; } // the index this run would save into was erased in another tab before it began (R5-D3)
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
@@ -2620,7 +2645,12 @@ async function saveCollDialog(preIds) {
   let landed; try { landed = typeof DB.putCollIfLive === 'function' ? await DB.putCollIfLive(c, typeof Indexer !== 'undefined' ? Indexer.gen : undefined) : null; if (landed === 'unjudged') landed = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.putCollIfLive(c, Indexer.gen); if (landed === null) { let cw = await DB.put('colls', c.id, c, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.put('colls', c.id, c, Indexer.gen); landed = (cw === false || cw === 'unjudged') ? cw : c; } } catch (e) { try { Log.add('ERR', 'collection not saved', e.message); } catch {} toast(`That collection didn't save (${e.message}). Nothing was saved.`, 6000); return; } // the write carries the generation inside its own transaction (R9-DS2): an erase landing between the ask above and the write is seen by the write itself
   if (landed === false || landed === 'unjudged') { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
   if (landed.type === 'set' && !landed.ids.length) { let dw; try { if (typeof DB.delCollIfEmpty === 'function') { dw = await DB.delCollIfEmpty(c.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (dw === 'unjudged') dw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.delCollIfEmpty(c.id, Indexer.gen); } else { let fw = await DB.del('colls', c.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (fw === 'unjudged') fw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.del('colls', c.id, Indexer.gen); dw = fw === true ? 'gone' : fw; } } catch (e) { try { Log.add('ERR', 'collection take-back failed', e.message); } catch {} L.colls.set(c.id, landed); renderSearchChips(); toast('Those photos are no longer in Iris — but the empty collection was created, and Iris couldn’t remove it.', 6000); return; } if (dw === false || dw === 'unjudged') { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } if (dw === 'kept') { let standing = null; try { standing = await DB.get('colls', c.id); } catch {} if (standing) landed = standing; else { toast('Those photos are no longer in Iris — the collection was not created.'); return; } } else { toast('Those photos are no longer in Iris — the collection was not created.'); return; } }
-  L.colls.set(c.id, landed); renderSearchChips(); toast(`Saved “${name}”` + (landed.type === 'smart' ? '. It updates itself as you add photos.' : '.'));
+  // The Saved word names the record that stands (R12-DS5): on the take-back's
+  // 'kept' road, landed is the STORE's record, which another tab may have
+  // renamed inside the put→delete breath — the word follows the adopted
+  // record's name, as its suffix already follows its type. On every other
+  // road landed carries the typed name, so the word there is unchanged.
+  L.colls.set(c.id, landed); renderSearchChips(); toast(`Saved “${landed.name}”` + (landed.type === 'smart' ? '. It updates itself as you add photos.' : '.'));
 }
 async function addToColl(ids) {
   // The add writes BEFORE it mutates (R5-D10): the new membership is built as a copy,
@@ -3468,11 +3498,16 @@ $('#pill').onclick = () => { if (AI.state === 'err') ensureAI(); else if (AI.sta
 $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); try { await AI.fromFile(f); if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; toast('That file didn’t work: ' + err.message, 5000); } };
 // "Folder, no pop-up" uses <input webkitdirectory>. Some Android browsers (Edge) ignore it silently, so watch for the
 // picker actually opening; if the page never loses focus, say so instead of doing nothing.
+// Both armed words ask the telling at fire time (R12-I2): a timer armed
+// before the stand-down is never recalled by it — indexGone keeps no
+// handle on it — so each word checks the flag in its own breath and
+// stays silent in the dead world (where the reading word would also be
+// untrue: #fDir's own change handler refuses the dead world at its door).
 function pickDir() {
   let opened = false; const mark = () => { opened = true; }; window.addEventListener('blur', mark, { once: true }); document.addEventListener('visibilitychange', mark, { once: true });
   $('#fDir').click();
-  setTimeout(() => { window.removeEventListener('blur', mark); if (!opened && !document.hidden) toast('This browser can’t open a folder this way. Use + Add folder instead.', 6000); }, 1800);
-  window.addEventListener('focus', () => setTimeout(() => { if (!$('#fDir').files?.length) return; toast('Reading the folder… big folders take a minute.', 8000); }, 50), { once: true });
+  setTimeout(() => { window.removeEventListener('blur', mark); if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; if (!opened && !document.hidden) toast('This browser can’t open a folder this way. Use + Add folder instead.', 6000); }, 1800);
+  window.addEventListener('focus', () => setTimeout(() => { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; if (!$('#fDir').files?.length) return; toast('Reading the folder… big folders take a minute.', 8000); }, 50), { once: true });
 }
 // The other three file doors carry the same refusal (R10-I2): their pickers
 // are the same system surfaces standing over the same choreography, and a
