@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.97';
+const VER = 'Iris 2.98';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -3806,6 +3806,12 @@ function bootRecovery(e) {
 // roads overlap — two tabs booting in the same breath, a message landing
 // mid-audit — the word is spoken exactly once. A note whose claim is won but
 // whose body is corrupt or empty is consumed silently by its claimer, as before.
+// One realm sits below the discipline (R13-PS1): where the realm has no Cache
+// Storage at all, no claim can even be attempted — a caches.open() there throws
+// synchronously, before any promise exists for the handler's catch to catch —
+// so the handler speaks from the message itself, as it did before the mailbox
+// existed, and this audit, which has no notes to read in that realm, stays
+// silent (its try/catch already swallows the same absence).
 async function swNoteAudit() {
   try {
     const nc = await caches.open('iris-sw-notes');
@@ -3840,7 +3846,7 @@ async function swNoteAudit() {
       // in R4-P5; the update reload was the door that cure left behind.
       swReloaded = true; Work.stop(); location.reload();
     });
-    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') { const say = () => Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); if (!d.version) say(); else caches.open('iris-sw-notes').then(async (nc) => { const key = 'shell-missing/' + d.version; if (await nc.match(key)) { if (await nc.delete(key)) say(); } else if (!d.noted) say(); }).catch(() => say()); } else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
+    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') { const say = () => Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); if (!d.version || typeof caches === 'undefined') say(); else caches.open('iris-sw-notes').then(async (nc) => { const key = 'shell-missing/' + d.version; if (await nc.match(key)) { if (await nc.delete(key)) say(); } else if (!d.noted) say(); }).catch(() => say()); } else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
     // Speak any shell-missing word an earlier clientless install left behind (R11-PS2).
     swNoteAudit();
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
