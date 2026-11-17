@@ -3,7 +3,11 @@ const RT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-retrieval@1.2.0';
 const CACHE = 'iris-model-v2';
 const MAN = 'https://iris-model.invalid/eg2-tv440/manifest';
 const key = (i) => 'https://iris-model.invalid/eg2-tv440/part/' + i;
-let mp = null, emb = null, diag = '';
+let mp = null, emb = null, diag = '', delegate = '';
+
+// Same FNV-1a checksum the page records per model part (R2-P5): a part whose bytes no
+// longer match the manifest's sum is refused here too, not just on the page path.
+function partSum(buf) { const u = new Uint8Array(buf); let h = 0x811c9dc5; for (let i = 0; i < u.length; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(16).padStart(8, '0'); }
 
 async function modelReader(blob) {
   if (blob) return blob.stream().getReader();
@@ -15,7 +19,9 @@ async function modelReader(blob) {
       if (i >= m.parts) return ctl.close();
       const p = await c.match(key(i));
       if (!p) { await c.delete(MAN); ctl.error(new Error('Part of the model is missing. Download it again.')); return; }
-      ctl.enqueue(new Uint8Array(await p.arrayBuffer())); i++;
+      const buf = await p.arrayBuffer();
+      if (m.sums && m.sums[i] && partSum(buf) !== m.sums[i]) { await c.delete(MAN); ctl.error(new Error('Part of the model failed its integrity check. Download it again.')); return; }
+      ctl.enqueue(new Uint8Array(buf)); i++;
       postMessage({ progress: Math.round(i / m.parts * 100) });
     },
   }).getReader();
@@ -61,14 +67,18 @@ onmessage = async ({ data }) => {
         try {
           const g = await createEmbedder(fileset, arg, 'GPU');
           await testEmbedder(g);
-          emb = g;
+          emb = g; delegate = 'GPU';
         } catch (gpuErr) {
           emb = await createEmbedder(fileset, arg);
+          delegate = 'CPU';
         }
       }
     } else if (op === 'text') r = out(await emb.embedText(arg));
     else if (op === 'image') r = out(await emb.embedImage(arg));
-    postMessage({ id, ok: true, r }, r ? [r.buffer] : []);
+    // The init reply carries which delegate won (R2-P8): the choice is proven here and
+    // then thrown away no longer — the page logs it and Diagnostics reports it, so a
+    // GPU delegate that crawls or fails on real-size images can be named from a paste.
+    postMessage({ id, ok: true, r, ...(op === 'init' ? { delegate } : {}) }, r ? [r.buffer] : []);
   } catch (e) {
     postMessage({ id, ok: false, err: ((e && e.message) || String(e)) + (diag ? ' {' + diag.trim() + '}' : '') });
   }

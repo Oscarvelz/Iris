@@ -491,20 +491,24 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.64';
+const VER = 'Iris 2.65';
 const Log = {
-  lines: [], t0: Date.now(),
+  lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
-    const t = ((Date.now() - this.t0) / 1000).toFixed(1).padStart(7); this.lines.push(`${t}s ${lv} ${msg}`); if (this.lines.length > 400) this.lines.splice(0, 100); this.persist(); },
+    const t = ((Date.now() - this.t0) / 1000).toFixed(1).padStart(7); this.lines.push(`${t}s ${lv} ${msg}`); if (this.lines.length > 400) { this.lines.splice(0, 100); this.restored = Math.max(0, this.restored - 100); } this.persist(); },
   // The log is the only witness when the page dies (P-6): its tail is kept in localStorage as
   // lines are added — bounded (the newest 120 lines) and cheap — and restored at the next
-  // launch, so a crash or an OOM kill still leaves a trace Copy report can carry.
-  persist() { try { localStorage.setItem('iris-log', JSON.stringify({ at: new Date().toISOString(), lines: this.lines.slice(-120) })); } catch {} },
+  // launch, so a crash or an OOM kill still leaves a trace Copy report can carry. Restored
+  // lines are display-only (R2-P2): they sit at the head of `lines` (counted by `restored`)
+  // so this session's report can carry them, but persist() never writes them back — a
+  // session persists only its OWN lines, so markers can never nest and old lines are never
+  // relabelled as a newer session's.
+  persist() { try { localStorage.setItem('iris-log', JSON.stringify({ at: new Date().toISOString(), lines: this.lines.slice(this.restored).slice(-120) })); } catch {} },
   async report() {
     let est = {}; try { est = await navigator.storage.estimate(); } catch {}
     let gpu = 'none'; try { const a = await navigator.gpu?.requestAdapter(); gpu = a ? 'yes ' + (a.info?.vendor || '') + ' ' + (a.info?.architecture || '') : 'no adapter'; } catch (e) { gpu = 'err ' + e.message; }
     return [`${VER} · ${new Date().toISOString()} · open ${Math.round(performance.now() / 1000)}s`, navigator.userAgent, `${NATIVE ? 'Shell ' + (window.IrisNative.version?.() || '?') + ' · all files ' + Nat.has() + ' · ' : ''}WebGPU: ${gpu} · dirPicker: ${'showDirectoryPicker' in window} · cores ${navigator.hardwareConcurrency}`,
-      `AI: ${AI.state} ${AI.lastErr ? '(' + AI.lastErr.message + ')' : ''} · ${AI.msPer ? Math.round(AI.msPer) + ' ms/photo' : ''}`,
+      `AI: ${AI.state} ${AI.lastErr ? '(' + AI.lastErr.message + ')' : ''} · ${AI.msPer ? Math.round(AI.msPer) + ' ms/photo' : ''}${AI.delegate ? ' · delegate ' + AI.delegate : ''}`,
       `Photos: ${L.count} · folders: ${[...L.folders.values()].map((f) => f.name).join(', ') || 'none'} · queue ${Indexer.queue.length} · running ${Indexer.running} · scanning ${Indexer.scanning || 'no'} (listed ${Indexer.found || 0}) · waiting ${(Indexer.later || []).map((f) => f.name).join(', ') || 'none'} · done ${Indexer.done}/${Indexer.total} skipped ${Indexer.skipped}`,
       `Storage: ${est.usage ? fmtMB(est.usage) : '?'} of ${est.quota ? fmtMB(est.quota) : '?'}`, '---', ...this.lines].join('\n');
   },
@@ -515,12 +519,12 @@ addEventListener('error', (e) => { Log.add('ERR', 'uncaught', e.message, (e.file
 addEventListener('unhandledrejection', (e) => { Log.add('ERR', 'unhandled', e.reason); if (Date.now() - lastCrashToast > 8000) { lastCrashToast = Date.now(); toast('Something went wrong: ' + (e.reason?.message || e.reason) + '. Library → Diagnostics has details.', 6000); } });
 /* P-6 restore: whatever the previous session logged before it ended — cleanly or by dying —
    comes back at the head of this session's log, under a marker that says it is not this launch. */
-try { const prevLog = JSON.parse(localStorage.getItem('iris-log') || 'null'); if (prevLog && Array.isArray(prevLog.lines) && prevLog.lines.length) Log.lines.push('——— previous session' + (prevLog.at ? ' · ' + prevLog.at : '') + ' ———', ...prevLog.lines); } catch {}
+try { const prevLog = JSON.parse(localStorage.getItem('iris-log') || 'null'); if (prevLog && Array.isArray(prevLog.lines) && prevLog.lines.length) { Log.lines.push('——— previous session' + (prevLog.at ? ' · ' + prevLog.at : '') + ' ———', ...prevLog.lines); Log.restored = 1 + prevLog.lines.length; } } catch {}
 
 /* ---------------- IndexedDB ---------------- */
 const DB = {
   db: null,
-  open() { return new Promise((res, rej) => { const r = indexedDB.open('iris', 1); r.onupgradeneeded = () => { const d = r.result; for (const s of ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); }; r.onsuccess = () => { this.db = r.result; res(); }; r.onerror = () => rej(r.error); }); },
+  open() { return new Promise((res, rej) => { const r = indexedDB.open('iris', 1); r.onupgradeneeded = () => { const d = r.result; for (const s of ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); }; r.onsuccess = () => { const d = r.result; this.db = d; d.onversionchange = () => { try { d.close(); } catch {} if (this.db === d) this.db = null; }; res(); }; r.onerror = () => rej(r.error); r.onblocked = () => { const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; rej(e); }; }); },
   tx(stores, mode = 'readonly') { return this.db.transaction(stores, mode); },
   get(store, key) { return new Promise((res, rej) => { const q = this.tx([store]).objectStore(store).get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
   put(store, key, val) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
@@ -566,13 +570,19 @@ async function sweepOrphans(onlyFolder = null) {
    window.__irisSaved. Shells older than this web version simply don't have saveStart, so
    this returns 'unavailable' and the export falls through to the browser paths below. */
 const NativeSave = {
-  seq: 0, current: null, stale: 0, chain: Promise.resolve(), timeout: 120000,
+  seq: 0, current: null, poisoned: new Set(), chain: Promise.resolve(), timeout: 120000,
   // Saves are SERIALIZED (P-8): the shell reports back through ONE callback with no token in
   // it, so two saves in flight at once could never be told apart — the old single `pending`
   // slot let the second save overwrite the first, and a callback could settle the wrong save
   // (or none: no timeout meant a lost callback hung the export forever). Now each save queues
   // behind the previous one, registers itself as the only save a callback can settle, and
   // answers 'timeout' if the shell never calls back.
+  // A save that ends WITHOUT its callback (timeout, or saveFinish throwing) leaves its id in
+  // `poisoned` (R2-P1): its callback is still owed and may arrive late, and because the
+  // callback carries no token, attribution is oldest-first — while any poisoned id is
+  // outstanding, an arriving callback is absorbed by that dead save and can NEVER settle
+  // the living one. The living save settles only from a later callback or its own timeout,
+  // so the failure direction is an honest 'timeout', never a false 'saved'.
   save(file) { const run = this.chain.then(() => this._save(file)); this.chain = run.catch(() => {}); return run; },
   async _save(file) {
     const B = window.IrisNative; if (!B?.saveStart) return 'unavailable';
@@ -588,14 +598,14 @@ const NativeSave = {
     } catch (e) { try { B.saveAbort(); } catch {} return 'unavailable'; }
     const id = ++this.seq;
     const done = new Promise((res) => {
-      const timer = setTimeout(() => { if (this.current && this.current.id === id) { this.current = null; this.stale++; res('timeout'); } }, this.timeout);
+      const timer = setTimeout(() => { if (this.current && this.current.id === id) { this.current = null; this.poisoned.add(id); res('timeout'); } }, this.timeout);
       this.current = { id, settle: (r) => { clearTimeout(timer); res(r); } };
     });
-    try { B.saveFinish(); } catch (e) { if (this.current && this.current.id === id) this.current = null; return 'unavailable'; }
+    try { B.saveFinish(); } catch (e) { if (this.current && this.current.id === id) { this.current = null; this.poisoned.add(id); } return 'unavailable'; }
     const r = await done; return r === 'saved' ? 'saved' : r === 'timeout' ? 'timeout' : 'cancel';
   },
 };
-window.__irisSaved = (r) => { const c = NativeSave.current; if (!c) { if (NativeSave.stale > 0) NativeSave.stale--; return; } NativeSave.current = null; c.settle(r); };
+window.__irisSaved = (r) => { const NS = NativeSave; if (NS.poisoned.size) { NS.poisoned.delete(NS.poisoned.values().next().value); return; } const c = NS.current; if (!c) return; NS.current = null; c.settle(r); };
 /* Background work (2.33, at Oscar's ask): while the indexer understands photos, the shell's work
    service keeps Iris alive — a progress notification and a wake lock — so a long folder check can
    finish with the screen off or another app in front. bg=true is also what lets the indexer loop
@@ -769,7 +779,7 @@ function stats(arr) { let m = 0; for (const v of arr) m += v; m /= arr.length ||
 
 /* ---------------- Model ---------------- */
 const AI = {
-  mp: null, fileset: null, emb: null, state: 'off', textCache: new Map(), msPer: 0, WT: { init: 180000, text: 30000, image: 120000 },
+  mp: null, fileset: null, emb: null, delegate: '', state: 'off', textCache: new Map(), msPer: 0, WT: { init: 180000, text: 30000, image: 120000 },
   setPill(state, text) { const was = this.state; this.state = state; if (was !== state) setTimeout(() => UI.renderIndex?.(), 0); $('#pdot').className = 'dot ' + ({ ok: 'ok', busy: 'busy', err: 'err' }[state] || ''); $('#ptext').textContent = text; },
   async runtime() {
     if (!this.mp) this.mp = await import(RT + '/retrieval_bundle.mjs');
@@ -780,7 +790,14 @@ const AI = {
   MAN: 'https://iris-model.invalid/eg2-tv440/manifest',
   async manifest() { try { const c = await caches.open('iris-model-v2'); const r = await c.match(this.MAN); return r ? await r.json() : null; } catch { return null; } },
   async cached() { return !!(await this.manifest()) || !!this.blob; },
-  async putPart(c, i, buf) { try { await c.put(this.key(i), new Response(buf, { headers: { 'content-type': 'application/octet-stream' } })); } catch (e) { throw new Error('Your browser refused to save the model (' + e.message + '). Check free storage and that this isn\u2019t an incognito tab.'); } },
+  // Integrity beyond size (R2-P5): a cheap FNV-1a checksum per model part. Size alone
+  // cannot see same-size rot — a stored part is only ever trusted when its bytes still
+  // match the checksum recorded with them (in the part's own header at save time, and in
+  // the manifest for the set). Legacy parts/manifests written before checksums carry no
+  // sum; those verify by size as they always did and gain sums the next time they are
+  // written — no forced re-download.
+  sum(buf) { const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf); let h = 0x811c9dc5; for (let i = 0; i < u.length; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(16).padStart(8, '0'); },
+  async putPart(c, i, buf) { const s = this.sum(buf); try { await c.put(this.key(i), new Response(buf, { headers: { 'content-type': 'application/octet-stream', 'x-iris-sum': s } })); } catch (e) { throw new Error('Your browser refused to save the model (' + e.message + '). Check free storage and that this isn\u2019t an incognito tab.'); } return s; },
   async download() {
     if (await this.cached()) return;
     const c = await caches.open('iris-model-v2');
@@ -799,42 +816,69 @@ const AI = {
     // first part tells us the total size and whether ranges work
     const first = await getPart(0, 0);
     if (first.status === 200) { // no range support: whole file in one go
-      const total = +first.headers.get('content-length') || MODEL_MB * 1e6; const reader = first.body.getReader(); const chunks = []; let got = 0;
+      // The whole-file path must not bless a total it never verified (R2-P5): without a
+      // content-length there is no way to know the body is complete, so a length-less
+      // answer fails honestly and retryably instead of chopping a truncated body into
+      // parts and recording its short size as the truth.
+      const total = +first.headers.get('content-length') || 0;
+      if (!total) throw new Error('The model server did not report the model\u2019s size, so the download cannot be checked. Nothing was saved. Tap the status to try again.');
+      const reader = first.body.getReader(); const chunks = []; let got = 0;
       for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.byteLength; const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); }
-      if (first.headers.get('content-length') && got !== total) throw new Error('The model download was corrupted (received ' + got + ' of ' + total + ' bytes). Nothing was saved. Tap the status to download it again.');
-      this.blob = new Blob(chunks); let n = 0;
-      try { for (let a = 0; a < this.blob.size; a += this.PART, n++) await this.putPart(c, n, await this.blob.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: this.blob.size, parts: n }))); this.blob = null; } catch (e) { console.warn('model kept in memory only', e); toast('Model works now but couldn\u2019t be saved, so it will download again next time.', 6000); }
+      if (got !== total) throw new Error('The model download was corrupted (received ' + got + ' of ' + total + ' bytes). Nothing was saved. Tap the status to download it again.');
+      this.blob = new Blob(chunks); let n = 0; const sums = [];
+      try { for (let a = 0; a < this.blob.size; a += this.PART, n++) sums[n] = await this.putPart(c, n, await this.blob.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: this.blob.size, parts: n, sums }))); this.blob = null; } catch (e) { console.warn('model kept in memory only', e); toast('Model works now but couldn\u2019t be saved, so it will download again next time.', 6000); }
       return;
     }
     const total = +((first.headers.get('content-range') || '').split('/')[1]) || MODEL_MB * 1e6; const parts = Math.ceil(total / this.PART);
-    let got = 0; const tick = () => { const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); };
+    let got = 0; const sums = []; const tick = () => { const p = Math.floor(got / total * 100); this.setPill('busy', `Downloading AI ${p}%`); UI.onModelProgress?.(p, got, total); };
     const corrupt = async (why) => { for (let j = 0; j < parts; j++) { try { await c.delete(this.key(j)); } catch {} } try { await c.delete(this.MAN); } catch {} throw new Error('The model download was corrupted (' + why + '). Nothing was saved. Tap the status to download it again.'); };
     for (let i = 0; i < parts; i++) {
       const want = Math.min(this.PART, total - i * this.PART);
       const prev = await c.match(this.key(i));
-      if (prev) { if ((await prev.arrayBuffer()).byteLength === want) { got += want; tick(); continue; } await c.delete(this.key(i)); } // resume trusts a stored part only at exactly the right size
+      if (prev) {
+        const pb = await prev.arrayBuffer();
+        if (pb.byteLength === want) {
+          // Resume trusts a stored part at the right size AND — when the part carries the
+          // checksum it was saved with — only if its bytes still match it (R2-P5): a
+          // same-size rotten part falls through and is fetched again. A legacy part with
+          // no recorded sum is trusted by size as before, and is re-saved with its sum so
+          // the store becomes self-verifying from here on.
+          const recorded = prev.headers.get('x-iris-sum'); const s = this.sum(pb);
+          if (!recorded || recorded === s) { sums[i] = s; if (!recorded) await this.putPart(c, i, pb); got += want; tick(); continue; }
+        }
+        await c.delete(this.key(i));
+      }
       let buf; for (let t = 0; t < 3 && !buf; t++) { try { const r = i === 0 ? first : await getPart(i, total); buf = await r.arrayBuffer(); } catch (e) { if (e.fatal) await corrupt(e.message); if (t === 2) throw e; await sleep(1500); } }
       if (buf.byteLength !== want) await corrupt('part ' + i + ' arrived with ' + buf.byteLength + ' bytes instead of ' + want);
-      await this.putPart(c, i, buf); got += buf.byteLength; tick();
+      sums[i] = await this.putPart(c, i, buf); got += buf.byteLength; tick();
     }
     if (got !== total) await corrupt('the parts add up to ' + got + ' bytes instead of ' + total);
-    await c.put(this.MAN, new Response(JSON.stringify({ total, parts })));
+    await c.put(this.MAN, new Response(JSON.stringify({ total, parts, sums })));
   },
   async stream() {
     if (this.blob) return this.blob.stream().getReader();
     const m = await this.manifest(); if (!m) throw new Error('Model not downloaded'); const c = await caches.open('iris-model-v2'); let i = 0; const self = this;
-    return new ReadableStream({ async pull(ctl) { if (i >= m.parts) return ctl.close(); const r = await c.match(self.key(i)); if (!r) { await caches.open('iris-model-v2').then((cc) => cc.delete(self.MAN)); ctl.error(new Error('Part of the model is missing. Download it again.')); return; } ctl.enqueue(new Uint8Array(await r.arrayBuffer())); i++; self.setPill('busy', `Loading AI ${Math.round(i / m.parts * 100)}%`); } }).getReader();
+    return new ReadableStream({ async pull(ctl) { if (i >= m.parts) return ctl.close(); const r = await c.match(self.key(i)); if (!r) { await caches.open('iris-model-v2').then((cc) => cc.delete(self.MAN)); ctl.error(new Error('Part of the model is missing. Download it again.')); return; } const buf = await r.arrayBuffer(); if (m.sums && m.sums[i] && self.sum(buf) !== m.sums[i]) { await caches.open('iris-model-v2').then((cc) => cc.delete(self.MAN)); ctl.error(new Error('Part of the model failed its integrity check. Download it again.')); return; } ctl.enqueue(new Uint8Array(buf)); i++; self.setPill('busy', `Loading AI ${Math.round(i / m.parts * 100)}%`); } }).getReader();
   },
   async fromFile(file) {
-    this.setPill('busy', 'Saving model…'); const c = await caches.open('iris-model-v2'); let n = 0;
-    try { for (let a = 0; a < file.size; a += this.PART, n++) await this.putPart(c, n, await file.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: file.size, parts: n }))); }
+    this.setPill('busy', 'Saving model…'); const c = await caches.open('iris-model-v2'); let n = 0; const sums = [];
+    try { for (let a = 0; a < file.size; a += this.PART, n++) sums[n] = await this.putPart(c, n, await file.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: file.size, parts: n, sums }))); }
     catch (e) { this.blob = file; toast('Using the file without saving it.', 4000); }
-    this.emb = null; this._loading = null; await this.load();
+    this.emb = null; await this.load();
   },
   async load() {
     if (this.emb) return this.emb;
     if (this._loading) return this._loading;
-    this._loading = (async () => {
+    // Single flight (R2-P4): _loading names the ONE in-flight load from its start until
+    // it SETTLES, and only the load itself clears it (on settle, below). die() used to
+    // null it the moment a worker died — while this load was still running on into its
+    // page fallback — so any caller in that window (an indexer retry, ensureAI, a
+    // search) started a SECOND load: a second worker beside the page embedder being
+    // built, the model loaded twice, and an end state split-brained, with a live
+    // orphaned worker whose later death would null the page embedder. Now every caller
+    // during any part of a load — worker attempt, death, fallback — joins this same
+    // promise: one logical load builds exactly one embedder, whoever wins.
+    const p = (async () => {
       try {
         if (!(await this.cached())) await this.download();
         this.setPill('busy', 'Starting AI…');
@@ -847,20 +891,23 @@ const AI = {
           const raw = (res) => Float32Array.from(res.embeddings[0].floatEmbedding);
           this.emb = { text: async (t) => raw(await m.embedText(t)), image: async (b) => raw(await m.embedImage(b)) };
         }
-        this.setPill('ok', 'AI ready'); Log.add('info', 'AI ready', this.worker ? '(worker)' : '(page)');
+        this.setPill('ok', 'AI ready'); Log.add('info', 'AI ready', this.worker ? '(worker · ' + (this.delegate || 'delegate unknown') + ')' : '(page)');
         await DB.put('kv', 'modelOk', true);
         UI.onModelReady();
         return this.emb;
-      } catch (e) { console.error('AI load failed', e); if (/magic number|missing/i.test(e.message || '')) { try { await caches.delete('iris-model-v2'); await caches.delete('iris-model'); } catch {} } this.setPill('err', 'AI error: tap for details'); this.lastErr = e; this._loading = null; throw e; }
+      } catch (e) { console.error('AI load failed', e); if (/magic number|missing/i.test(e.message || '')) { try { await caches.delete('iris-model-v2'); await caches.delete('iris-model'); } catch {} } this.setPill('err', 'AI error: tap for details'); this.lastErr = e; throw e; }
     })();
-    return this._loading;
+    this._loading = p;
+    const clear = () => { if (this._loading === p) this._loading = null; };
+    p.then(clear, clear);
+    return p;
   },
   startWorker() {
     return new Promise((resolve, reject) => {
       const w = new Worker('ai-worker.js'); this.worker = w; const pend = new Map(); let seq = 0; // classic worker since 2.47 (the classic WASM loader registers via importScripts) — comment AFTER the full statement: in 2.47 it sat mid-line and commented out everything after it, seq included
       const die = (err) => {
         if (this.worker !== w) return;
-        this.worker = null; this.emb = null; this._loading = null;
+        this.worker = null; this.emb = null; this.delegate = '';
         try { w.terminate(); } catch {}
         for (const p of pend.values()) { clearTimeout(p.t); p.rej(err); }
         pend.clear();
@@ -868,7 +915,7 @@ const AI = {
         reject(err);
       };
       const call = (op, arg, transfer = []) => new Promise((res, rej) => { const id = ++seq; const t = setTimeout(() => { pend.delete(id); const err = new Error('The AI worker stopped responding (' + op + ')'); rej(err); die(err); }, this.WT[op] || 60000); pend.set(id, { res, rej, t }); w.postMessage({ id, op, arg }, transfer); });
-      w.onmessage = ({ data }) => { if (data.progress != null) { this.setPill('busy', `Loading AI ${data.progress}%`); return; } const p = pend.get(data.id); if (!p) return; pend.delete(data.id); clearTimeout(p.t); data.ok ? p.res(data.r) : p.rej(new Error(data.err)); };
+      w.onmessage = ({ data }) => { if (data.progress != null) { this.setPill('busy', `Loading AI ${data.progress}%`); return; } if (data.delegate) this.delegate = data.delegate; const p = pend.get(data.id); if (!p) return; pend.delete(data.id); clearTimeout(p.t); data.ok ? p.res(data.r) : p.rej(new Error(data.err)); };
       w.onerror = (e) => { e.preventDefault?.(); die(new Error(e.message || 'AI worker crashed')); };
       call('init', this.blob || null).then(() => resolve({ text: (t) => call('text', t), image: (b) => call('image', b, [b.buffer]) }), reject);
     });
@@ -904,7 +951,7 @@ const NatSized = {
 const Prep = {
   // Worker pool. HEIC decoding (libheif WASM) grows each worker's memory and it never shrinks, so a worker is
   // recycled after a few HEIC photos, and a crashed worker is replaced instead of giving up on workers for good.
-  pool: [], ok: true, seq: 0, rr: 0, crashes: 0, lastErr: '', n: 0,
+  pool: [], ok: true, seq: 0, rr: 0, crashes: 0, lastErr: '', n: 0, TIMEOUT: Symbol('prep-timeout'),
   init() { if (this.pool.length || !this.ok) return; try { this.n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < this.n; k++) this.spawn(k); } catch { this.ok = false; } },
   spawn(k) {
     const w = new Worker('prep-worker.js'); w.jobs = new Map(); w.heavy = 0; w.retire = false;
@@ -920,17 +967,44 @@ const Prep = {
     for (const p of jobs) { clearTimeout(p.t); p.res(undefined); }
   },
   send(msg, ms = 90000) {
-    const k = this.rr++ % this.pool.length, w = this.pool[k]; const id = ++this.seq;
-    return new Promise((res) => { const t = setTimeout(() => this.crash(k, w, 'timed out'), ms); w.jobs.set(id, { res, t }); w.postMessage({ ...msg, id }); });
+    if (!this.pool.length) return Promise.resolve(undefined);
+    let k = this.rr++ % this.pool.length;
+    if (this.pool[k].retire) { const j = this.pool.findIndex((w) => !w.retire); if (j >= 0) k = j; } // a retiring worker takes no new jobs
+    const w = this.pool[k]; const id = ++this.seq;
+    return new Promise((res) => {
+      const t = setTimeout(() => {
+        // A timeout condemns THIS job only (R2-P6): the job resolves as a timeout, its
+        // worker is retired — no new jobs, replaced once its remaining jobs drain — and
+        // every sibling keeps its own budget and its own chance to answer. A slow
+        // neighbour no longer executes a healthy photo, the crash counter is not
+        // charged for a photo that never crashed, and the worker's late answer, if it
+        // ever comes, finds no job waiting and is dropped.
+        const p = w.jobs.get(id); if (!p) return; w.jobs.delete(id); w.retire = true;
+        Log.add('warn', 'a prep job timed out; retiring its worker, other photos unaffected');
+        if (!w.jobs.size) this.replace(k, w);
+        res(this.TIMEOUT);
+      }, ms);
+      w.jobs.set(id, { res, t });
+      w.postMessage({ ...msg, id });
+    });
   },
-  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const sw = await NatSized.swap(file, 2048, false); return (await this.send({ op: 'big', file: sw?.file || file })) || null; },
+  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const sw = await NatSized.swap(file, 2048, false); const f = sw?.file || file; let r = await this.send({ op: 'big', file: f }); if (r === this.TIMEOUT) r = await this.send({ op: 'big', file: f }, 300000); return r === undefined || r === this.TIMEOUT ? null : r; },
   async run(file) {
     this.init(); this.lastErr = '';
     const sw = await NatSized.swap(file, 640); const f2 = sw?.file || file, ow = sw?.ow || 0, oh = sw?.oh || 0;
     if (!this.ok || !this.pool.length) return prep(f2, ow, oh);
-    let r = await this.send({ file: f2, ow, oh }); if (r !== undefined) return r;
-    r = await this.send({ file: f2, ow, oh }); if (r !== undefined) return r; // one retry in a fresh worker
-    this.lastErr = 'decoder crashed twice on this photo'; return /\.(heic|heif)$/i.test(file.name || '') ? null : prep(f2, ow, oh);
+    const c0 = this.crashes;
+    let r = await this.send({ file: f2, ow, oh }); if (r !== undefined && r !== this.TIMEOUT) return r;
+    // One retry in a fresh worker. A timeout is not a crash (R2-P7): the worker protocol
+    // has no heartbeat — a decode is one long call — so slow cannot be told from hung,
+    // and a huge HEIC on a weak phone can legitimately outlive the standard budget. The
+    // retry of a timed-out job therefore gets a far longer budget before anyone gives
+    // up on the photo; a crashed job retries on the normal one.
+    r = await this.send({ file: f2, ow, oh }, r === this.TIMEOUT ? 300000 : undefined); if (r !== undefined && r !== this.TIMEOUT) return r;
+    // The diagnosis claims only what was actually seen: a crash only if the crash
+    // counter moved during this photo, otherwise an honest timeout.
+    this.lastErr = this.crashes > c0 ? 'the decoder crashed on this photo' : 'the decoder did not finish this photo in time — it may simply be very large';
+    return /\.(heic|heif)$/i.test(file.name || '') ? null : prep(f2, ow, oh);
   },
 };
 async function prep(file, ow = 0, oh = 0) {
@@ -1969,7 +2043,7 @@ const UI = {
     if (card) { card.innerHTML = ''; const c = html(); if (c) card.append(c); }
     if (ban) { ban.innerHTML = ''; if (I.scanning && !I.done) ban.append(h('div', { class: 'banner' }, h('span', {}, `📁 Reading ${I.scanning}… ${fmtN(I.found)} photos found`)));
       else if (I.running) ban.append(h('div', { class: 'banner' }, h('span', { style: 'min-width:0' }, innerWidth < 600 ? `✦ ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' · finding more' : ` · ${fmtDur(eta)} left`) : `✦ Understanding photos: ${fmtN(I.done)} of ${fmtN(I.total)}` + (I.scanning ? ' (still finding more)' : `, about ${fmtDur(eta)} left`)), h('span', { class: 'sp' }), h('button', { class: 'btn sm', title: 'How hard Iris works your phone while indexing', onclick: () => Indexer.cycleSpeed() }, Indexer.speedLabel()), h('button', { class: 'btn sm', onclick: () => go('lib') }, 'Details')));
-      else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { AI._loading = null; ensureAI(); } }, 'Try again')));
+      else if (AI.state === 'err') ban.append(h('div', { class: 'banner' }, h('span', {}, 'The AI didn’t start: ' + (AI.lastErr?.message || 'unknown error')), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => ensureAI() }, 'Try again')));
       else if (AI.state === 'busy' && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, 'Getting the AI ready. This takes up to a minute the first time…')));
       else if (L.folders.size && !L.count) ban.append(h('div', { class: 'banner' }, h('span', {}, L.folders.size === 1 ? `Your folder ${[...L.folders.values()][0].name} is linked. Ready to read it?` : `${L.folders.size} folders are linked. Ready to read them?`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Start')));
       else if (UI.pendingScan && L.folders.size) ban.append(h('div', { class: 'banner' }, h('span', {}, `Paused at ${fmtN(L.count)} photos because Iris was closed or reloaded.`), h('span', { class: 'sp' }), h('button', { class: 'btn sm pri', onclick: () => Indexer.scan([...L.folders.values()]) }, 'Continue')));
@@ -2000,7 +2074,7 @@ function show(v) { cancelTilePresses(); cur = v; $$('.view').forEach((x) => x.cl
 function go(v) { if (v !== cur) { NavStack.push(cur); if (NavStack.length > 30) NavStack.shift(); } show(v); }
 $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { if (Sel.on) endSel(); go(b.dataset.v); } });
 $('#binBtn').onclick = () => { if (Sel.on) endSel(); go('bin'); };
-$('#pill').onclick = () => { if (AI.state === 'err') { AI._loading = null; ensureAI(); } else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
+$('#pill').onclick = () => { if (AI.state === 'err') ensureAI(); else if (AI.state !== 'ok') ensureAI(); else toast(`AI ready · ${AI.msPer ? Math.round(AI.msPer) + ' ms per photo' : 'on this device'}`); };
 $('#fModel').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); try { await AI.fromFile(f); toast('Model loaded from file'); renderLib(); if (!L.count) askFolder(); } catch (err) { toast('That file didn’t work: ' + err.message, 5000); } };
 // "Folder, no pop-up" uses <input webkitdirectory>. Some Android browsers (Edge) ignore it silently, so watch for the
 // picker actually opening; if the page never loses focus, say so instead of doing nothing.
@@ -2032,11 +2106,22 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
 function bootRecovery(e) {
   Log.add('ERR', 'boot stopped: the index would not open', e);
   let gone = false; const reload = () => { if (!gone) { gone = true; location.reload(); } };
-  const erase = () => { try { const r = indexedDB.deleteDatabase('iris'); r.onsuccess = reload; r.onerror = reload; r.onblocked = reload; } catch { reload(); } setTimeout(reload, 3000); };
+  const blocked = !!e?.blocked;
+  const waitNote = h('p', { class: 'sub', style: 'display:none' }, 'Waiting for the other Iris tab to close — the erase finishes on its own as soon as it does.');
+  const eraseBtn = h('button', { class: 'btn danger', onclick: () => erase() }, 'Erase index and reload');
+  const erase = () => {
+    // A blocked erase must NOT reload (R2-P9): with another tab holding the index, the
+    // deletion pends — and a reloaded boot's own open queues behind the pending deletion,
+    // parking the tab on a blank page for exactly as long as the other tab lives. So a
+    // blocked deletion stays on this surface and says what it is waiting for; when the
+    // other tab closes, the deletion completes and onsuccess reloads into a clean boot.
+    try { const r = indexedDB.deleteDatabase('iris'); r.onsuccess = reload; r.onerror = reload; r.onblocked = () => { waitNote.style.display = ''; eraseBtn.disabled = true; Log.add('warn', 'erase is waiting for another Iris tab to close'); }; } catch { reload(); }
+  };
   const ov = h('div', { class: 'ov on' }, h('div', { class: 'scrim' }), h('div', { class: 'sheet' },
     h('h2', {}, 'Iris can’t open its index'),
-    h('p', { class: 'sub' }, 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
-    h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: reload }, 'Try again'), h('button', { class: 'btn danger', onclick: erase }, 'Erase index and reload'))));
+    h('p', { class: 'sub' }, blocked ? 'Another Iris tab is holding the index open, so this tab has to wait. Close the other Iris tab, then tap Try again. Your photos themselves are not touched.' : 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
+    waitNote,
+    h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: reload }, 'Try again'), eraseBtn)));
   ov.id = 'bootFail'; document.body.append(ov);
 }
 (async function boot() {
@@ -2068,7 +2153,15 @@ function bootRecovery(e) {
     }).catch(() => {});
   }
   caches.delete('iris-model').catch(() => {});
-  try { await DB.open(); } catch (e) { bootRecovery(e); return; }
+  // An open can also park without ever settling (R2-P9): queued behind another tab's
+  // pending deletion, its promise neither resolves nor rejects, and boot would sit on a
+  // blank page with no surface and no trace. If the open has not settled in 6 s, land on
+  // the recovery surface with the honest reason; if the open later succeeds (the other
+  // tab closed), reload into the clean boot it unblocked.
+  const openP = DB.open();
+  let openSlow = false;
+  const slowTimer = setTimeout(() => { openSlow = true; const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; bootRecovery(e); openP.then(() => location.reload(), () => {}); }, 6000);
+  try { await openP; clearTimeout(slowTimer); if (openSlow) return; } catch (e) { clearTimeout(slowTimer); if (openSlow) return; bootRecovery(e); return; }
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
   for (const [id, buf] of vecs) { const m = metas.get(id); if (m) L.add(m, new Float32Array(buf)); }
   for (const [id, f] of await DB.all('folders')) { if (f.handle?.__native) Object.setPrototypeOf(f.handle, NDir.prototype); L.folders.set(id, f); }

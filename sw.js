@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v79';
+const VERSION = 'iris-v80';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
@@ -38,7 +38,11 @@ self.addEventListener('fetch', (e) => {
   // is a suspect in the AI worker's 'ModuleFactory not set' failure on Oscar's phone).
   if (url.hostname === 'cdn.jsdelivr.net') {
     e.respondWith(caches.open('iris-runtime-2').then(async (c) => {
-      try { const res = await fetch(e.request); if (res.ok) c.put(e.request, res.clone()); return res; }
+      // A resolved-but-bad response is CDN trouble too (R2-P3): a jsdelivr 5xx during an
+      // outage, or a 404 after a package move, used to be served raw while a good cached
+      // runtime sat unused — the fallback now answers on ANY unusable response whenever a
+      // cached copy exists, and the error is served only when there is nothing cached.
+      try { const res = await fetch(e.request); if (res.ok) { c.put(e.request, res.clone()); return res; } const hit = await c.match(e.request); if (hit) return hit; return res; }
       catch { const hit = await c.match(e.request); if (hit) return hit; throw new Error('offline and not cached'); }
     }));
     return;
