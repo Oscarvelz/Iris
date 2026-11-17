@@ -14,18 +14,24 @@ async function decodeHeif(file) {
   try { dec.decoder && heif.heif_context_free && heif.heif_context_free(dec.decoder); } catch {}
   return createImageBitmap(new ImageData(data.data, w, h));
 }
+// bitmap() also reports whether libheif did the decoding (lib): the browser's own
+// decoder succeeding — above all on the shell's resized JPEG copy of a HEIC photo,
+// which keeps the .heic name over JPEG bytes — says nothing about the library, and
+// the page's HEIC circuit breaker may only credit an answer to the library that
+// actually produced it (R7-P2). An answer that fails carries no lib: a failed
+// decode is not the library answering.
 async function bitmap(file) {
-  try { return await createImageBitmap(file); }
-  catch (e) { if (isHeif(file)) return decodeHeif(file); throw new Error('can’t decode ' + (file.type || file.name) + ': ' + (e && e.message || e)); }
+  try { return { bmp: await createImageBitmap(file), lib: 0 }; }
+  catch (e) { if (isHeif(file)) return { bmp: await decodeHeif(file), lib: 1 }; throw new Error('can’t decode ' + (file.type || file.name) + ': ' + (e && e.message || e)); }
 }
 // full-screen copy for the viewer (HEIC can't be shown directly)
 async function big(file) {
-  const bmp = await bitmap(file); const s = Math.min(1, 2048 / Math.max(bmp.width, bmp.height));
+  const d = await bitmap(file); const bmp = d.bmp; const s = Math.min(1, 2048 / Math.max(bmp.width, bmp.height));
   const c = new OffscreenCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s)); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
-  return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+  return { p: await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 }), lib: d.lib };
 }
 async function prep(file, ow = 0, oh = 0) {
-  const bmp = await bitmap(file);
+  const bd = await bitmap(file); const bmp = bd.bmp;
   const W = ow || bmp.width, H = oh || bmp.height; const s = Math.min(1, 640 / Math.max(W, H));
   const mw = Math.max(1, Math.round(W * s)), mh = Math.max(1, Math.round(H * s));
   const c = new OffscreenCanvas(mw, mh); c.getContext('2d').drawImage(bmp, 0, 0, mw, mh); bmp.close();
@@ -45,10 +51,10 @@ async function prep(file, ow = 0, oh = 0) {
   const hd = hx.getImageData(0, 0, 9, 8).data; let bits = '';
   for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const a = (y * 9 + x) * 4, b = a + 4; bits += (hd[a] + hd[a + 1] + hd[a + 2]) > (hd[b] + hd[b + 1] + hd[b + 2]) ? '1' : '0'; }
   const dh = BigInt('0b' + bits).toString(16).padStart(16, '0');
-  return { bytes, thumb, w: W, h: H, bright, sharp, dh };
+  return { bytes, thumb, w: W, h: H, bright, sharp, dh, lib: bd.lib };
 }
 onmessage = async ({ data }) => {
-  if (data.op === 'big') { try { postMessage({ id: data.id, p: await big(data.file), heavy: isHeif(data.file) ? 1 : 0 }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); } return; }
-  try { const p = await prep(data.file, data.ow, data.oh); postMessage({ id: data.id, p, heavy: isHeif(data.file) ? 1 : 0 }, p ? [p.bytes.buffer] : []); }
+  if (data.op === 'big') { try { const r = await big(data.file); postMessage({ id: data.id, p: r.p, lib: r.lib, heavy: isHeif(data.file) ? 1 : 0 }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); } return; }
+  try { const p = await prep(data.file, data.ow, data.oh); const lib = p.lib || 0; delete p.lib; postMessage({ id: data.id, p, lib, heavy: isHeif(data.file) ? 1 : 0 }, p ? [p.bytes.buffer] : []); }
   catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e), heavy: isHeif(data.file) ? 1 : 0 }); }
 };

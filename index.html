@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.79';
+const VER = 'Iris 2.80';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1317,10 +1317,24 @@ const Prep = {
   pool: [], ok: true, seq: 0, rr: 0, crashes: 0, lastErr: '', n: 0, TIMEOUT: Symbol('prep-timeout'),
   heifSilent: 0, heifDead: false, // the libheif circuit breaker (R5-PS1): consecutive HEIC jobs whose worker did not answer within budget. Silence cannot tell a thread parked inside the worker's synchronous libheif import from a merely slow photo (R2-P7), so the breaker records the silence and claims no cause (R6-P5)
   isHeif(f) { return /\.(heic|heif)$/i.test(f?.name || '') || /hei[cf]/i.test(f?.type || ''); },
+  // A photo's durable identity at this boundary (R7-P1): every door — indexer,
+  // thumb fixer, viewer — mints a fresh File object for the same photo, but the
+  // name, size and mtime come from the disk and agree across all of them.
+  // Callers compute the key from the ORIGINAL file, before NatSized.swap
+  // replaces it with a resized copy whose size differs per door.
+  keyOf(f) { return f ? (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0) : ''; },
   init() { if (this.pool.length || !this.ok) return; try { this.n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < this.n; k++) this.spawn(k); } catch { this.ok = false; } },
   spawn(k) {
     const w = new Worker('prep-worker.js'); w.jobs = new Map(); w.heavy = 0; w.retire = false;
-    w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p && p.heif) { this.heifSilent = 0; if (this.heifDead) { this.heifDead = false; Log.add('warn', 'the HEIC decoder library answered again — HEIC photos are no longer paused', 'libheif'); } } if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
+    // A HEIC answer resets the silence count and revives a standing trip only
+    // when the worker attributes the decode to libheif itself (data.lib,
+    // R7-P2): a worker can answer a HEIC-named job without the library ever
+    // loading — the browser's own decoder, or the shell's JPEG copy of the
+    // photo — and that answer never spoke for the library. An answer with no
+    // lib field (a worker from before the flag existed) is tolerated and
+    // credited with nothing. A credited answer also clears the vote ledger:
+    // a new run of silence starts with fresh witnesses (R7-P1).
+    w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p && p.heif && data.lib) { this.heifSilent = 0; this._heifCounted?.clear(); if (this.heifDead) { this.heifDead = false; Log.add('warn', 'the HEIC decoder library answered again — HEIC photos are no longer paused', 'libheif'); } } if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
     w.onerror = (e) => { e.preventDefault?.(); this.crash(k, w, e.message || 'out of memory'); };
     this.pool[k] = w;
   },
@@ -1338,9 +1352,11 @@ const Prep = {
     // resolves exactly as a crashed one does, instantly, and its caller lands on
     // the honest wording in run(). Other photos are untouched: the pool stays
     // healthy for everything that is not HEIC. The gate lifts early only on
-    // evidence: a HEIC job posted before the trip that still answers proves the
-    // library is responsive again, and the message handler revives the path
-    // (R6-P5).
+    // evidence: a HEIC job posted before the trip whose answer the worker
+    // attributes to the library itself (its lib flag) proves the library is
+    // responsive again, and the message handler revives the path (R6-P5,
+    // R7-P2). An answer the library did not produce — the browser's decoder,
+    // the shell's JPEG copy, or a worker too old to say — never lifts it.
     if (this.heifDead && this.isHeif(msg.file)) return Promise.resolve(undefined);
     let k = this.rr++ % this.pool.length;
     if (this.pool[k].retire) { const j = this.pool.findIndex((w) => !w.retire); if (j >= 0) k = j; } // a retiring worker takes no new jobs
@@ -1364,34 +1380,39 @@ const Prep = {
         // the full timeout ladder again, for a whole folder. Silent deaths are
         // counted — one vote per PHOTO, not per attempt: a photo's own retry is
         // the same witness, not a second one, and a single monstrous photo must
-        // never be allowed to pause the library on its own. Two photos in a row
-        // dying silently — any HEIC answer resets the count, because a worker
-        // that answers has the library — trip the breaker: the class is
+        // never be allowed to pause the library on its own. The ledger keys on
+        // the photo (name, size and mtime of the file the caller handed in,
+        // taken before any swap), because every door of the app mints a fresh
+        // File object for the same photo and an object-keyed ledger counted
+        // one photo as two witnesses (R7-P1). Two photos in a row dying
+        // silently — an answer the worker attributes to the library itself
+        // resets the count, because only that answer proves the library
+        // responsive (R7-P2) — trip the breaker: the class is
         // recorded, logged, and gated in send() until the library answers again
         // or the session ends. A timeout is still not a crash — the crash
         // counter keeps its own honest meaning.
-        if (p.heif) { const seen = this._heifCounted || (this._heifCounted = new WeakMap()); if (!seen.has(msg.file)) { seen.set(msg.file, 1); this.heifSilent++; if (this.heifSilent >= 2 && !this.heifDead) { this.heifDead = true; Log.add('ERR', 'HEIC photos are being skipped: the HEIC decoder library did not answer in time, so HEIC decoding is paused — reopening Iris tries the library again', 'libheif'); } } }
+        if (p.heif) { const seen = this._heifCounted || (this._heifCounted = new Set()); if (!seen.has(p.key)) { seen.add(p.key); this.heifSilent++; if (this.heifSilent >= 2 && !this.heifDead) { this.heifDead = true; Log.add('ERR', 'HEIC photos are being skipped: the HEIC decoder library did not answer in time, so HEIC decoding is paused — reopening Iris tries the library again', 'libheif'); } } }
         Log.add('warn', 'a prep job timed out; retiring its worker, other photos unaffected');
         if (!w.jobs.size) this.replace(k, w);
         res(this.TIMEOUT);
       }, ms);
-      w.jobs.set(id, { res, t, heif: this.isHeif(msg.file) });
+      w.jobs.set(id, { res, t, heif: this.isHeif(msg.file), key: msg.key || this.keyOf(msg.file) });
       w.postMessage({ ...msg, id });
     });
   },
-  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const sw = await NatSized.swap(file, 2048, false); const f = sw?.file || file; let r = await this.send({ op: 'big', file: f }); if (r !== undefined && r !== this.TIMEOUT) return r; r = await this.send({ op: 'big', file: f }, r === this.TIMEOUT ? 300000 : undefined); return r === undefined || r === this.TIMEOUT ? null : r; }, // the same retry policy as run() (R3-P4): a crashed job earns the same fresh-worker second chance as a timed-out one — only the retry's budget differs (the long one after a timeout, the normal one after a crash). big() used to retry timeouts only, abandoning a viewer photo whose worker died once although the pool had already replaced it
+  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const key = this.keyOf(file); const sw = await NatSized.swap(file, 2048, false); const f = sw?.file || file; let r = await this.send({ op: 'big', file: f, key }); if (r !== undefined && r !== this.TIMEOUT) return r; r = await this.send({ op: 'big', file: f, key }, r === this.TIMEOUT ? 300000 : undefined); return r === undefined || r === this.TIMEOUT ? null : r; }, // the same retry policy as run() (R3-P4): a crashed job earns the same fresh-worker second chance as a timed-out one — only the retry's budget differs (the long one after a timeout, the normal one after a crash). big() used to retry timeouts only, abandoning a viewer photo whose worker died once although the pool had already replaced it
   async run(file) {
     this.init(); this.lastErr = '';
-    const sw = await NatSized.swap(file, 640); const f2 = sw?.file || file, ow = sw?.ow || 0, oh = sw?.oh || 0;
+    const key = this.keyOf(file); const sw = await NatSized.swap(file, 640); const f2 = sw?.file || file, ow = sw?.ow || 0, oh = sw?.oh || 0;
     if (!this.ok || !this.pool.length) return prep(f2, ow, oh);
     const c0 = this.crashes;
-    let r = await this.send({ file: f2, ow, oh }); if (r !== undefined && r !== this.TIMEOUT) return r;
+    let r = await this.send({ file: f2, ow, oh, key }); if (r !== undefined && r !== this.TIMEOUT) return r;
     // One retry in a fresh worker. A timeout is not a crash (R2-P7): the worker protocol
     // has no heartbeat — a decode is one long call — so slow cannot be told from hung,
     // and a huge HEIC on a weak phone can legitimately outlive the standard budget. The
     // retry of a timed-out job therefore gets a far longer budget before anyone gives
     // up on the photo; a crashed job retries on the normal one.
-    r = await this.send({ file: f2, ow, oh }, r === this.TIMEOUT ? 300000 : undefined); if (r !== undefined && r !== this.TIMEOUT) return r;
+    r = await this.send({ file: f2, ow, oh, key }, r === this.TIMEOUT ? 300000 : undefined); if (r !== undefined && r !== this.TIMEOUT) return r;
     // The diagnosis claims only what was actually seen: a crash only if the crash
     // counter moved during this photo, otherwise an honest timeout — and when the
     // circuit breaker has tripped, the wording names the library's silence, the
@@ -2390,10 +2411,17 @@ const Viewer = {
   // Full-quality copy, decoded before it is shown, cached for the photos around the current one.
   full(id) {
     if (this.cache.has(id)) { const c = this.cache.get(id); this.cache.delete(id); this.cache.set(id, c); return c.p; }
+    // A failure to FETCH the original (the folder momentarily unreachable) is a
+    // blink, not a verdict: the entry is dropped by identity, like the native
+    // stall's, so the next visit asks again instead of serving the cached null
+    // all session (R7-PS1). A failed DECODE is a verdict about the photo and
+    // keeps its cached null — stepping back onto an undecodable HEIC must not
+    // re-pay the prep ladder on every visit; the #vFull button remains the
+    // manual retry, through showFile.
     const c = { url: null, blob: false }; c.p = (async () => {
       let u = null; const np = this.fastNative() && this.natPath(id);
       if (np) u = NAT_URL.replace('/f?', '/v?') + encodeURIComponent(np) + '&w=' + Math.min(2560, Math.round(Math.max(innerWidth, innerHeight) * (devicePixelRatio || 1)));
-      else { const f = await Folders.fileFor(id, false); if (!f) return null; let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
+      else { const f = await Folders.fileFor(id, false); if (!f) { if (this.cache.get(id) === c) this.cache.delete(id); return null; } let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
       c.url = u; const im = new Image(); im.src = u;
       // The native /v load joins the shell's stall discipline (R5-P3): this path
       // builds the endpoint's URL itself and used to await the decode bare, so a
