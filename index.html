@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.61';
+const VER = 'Iris 2.62';
 const Log = {
   lines: [], t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -527,6 +527,7 @@ const DB = {
   del(store, key) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); t.objectStore(store).delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   all(store) { return new Promise((res, rej) => { const out = []; const q = this.tx([store]).objectStore(store).openCursor(); q.onsuccess = () => { const c = q.result; if (c) { out.push([c.key, c.value]); c.continue(); } else res(out); }; q.onerror = () => rej(q.error); }); },
   saveItem(m, thumb, vec) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('thumbs').put(thumb, m.id); t.objectStore('vecs').put(vec.buffer.slice(0), m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  swapItem(m, buf, oldId) { return new Promise((res, rej) => { const t = this.tx(['meta', 'vecs', 'thumbs'], 'readwrite'); t.objectStore('meta').put(m, m.id); t.objectStore('vecs').put(buf, m.id); t.objectStore('meta').delete(oldId); t.objectStore('vecs').delete(oldId); t.objectStore('thumbs').delete(oldId); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   putMetas(ms) { return new Promise((res, rej) => { if (!ms.length) return res(); const t = this.tx(['meta'], 'readwrite'); const o = t.objectStore('meta'); for (const m of ms) o.put(m, m.id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   removeItems(ids) { return new Promise((res, rej) => { const t = this.tx(['meta', 'thumbs', 'vecs'], 'readwrite'); for (const id of ids) for (const s of ['meta', 'thumbs', 'vecs']) t.objectStore(s).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
   clear() { return new Promise((res, rej) => { const st = ['meta', 'thumbs', 'vecs', 'folders', 'colls', 'kv']; const t = this.tx(st, 'readwrite'); st.forEach((s) => t.objectStore(s).clear()); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
@@ -598,7 +599,11 @@ const Backup = {
     const entries = []; const parts = []; let off = 0;
     for (const [id, buf] of vecs) { const m = metas.get(id); if (!m || !buf) continue; entries.push({ m, o: off, n: buf.byteLength }); parts.push(new Uint8Array(buf)); off += buf.byteLength; }
     if (!entries.length) { toast('Nothing to back up yet — Iris has not understood any photo.'); return; }
-    const head = new TextEncoder().encode(JSON.stringify({ app: 'iris', kind: 'index-backup', v: 1, ver: VER, at: Date.now(), dim: DIM, entries, colls }));
+    // The dismissed duplicate groups are a user decision like the bin: they ride along
+    // (an additive field — older Iris versions simply ignore it), so a device move does
+    // not resurrect groups Oscar already said to keep (R2-D11).
+    let dismissed = []; try { dismissed = JSON.parse(localStorage.getItem('iris-dismissed') || '[]'); } catch {}
+    const head = new TextEncoder().encode(JSON.stringify({ app: 'iris', kind: 'index-backup', v: 1, ver: VER, at: Date.now(), dim: DIM, entries, colls, dismissed }));
     const pre = new Uint8Array(12); pre.set(new TextEncoder().encode('IRISBAK1')); new DataView(pre.buffer).setUint32(8, head.length, true);
     const name = `iris-backup-${new Date().toISOString().slice(0, 10)}.irisbak`;
     const file = new File([pre, head, ...parts], name, { type: 'application/octet-stream' });
@@ -631,16 +636,27 @@ const Backup = {
       const hlen = new DataView(buf).getUint32(8, true); const head = JSON.parse(new TextDecoder().decode(u.subarray(12, 12 + hlen)));
       if (head.kind !== 'index-backup') return toast('That is not an Iris backup file.', 5000);
       if (head.dim !== DIM) return toast('This backup came from a different AI model and cannot be restored here.', 6000);
-      const base = 12 + hlen; let n = 0, failed = 0, firstErr = '';
-      for (const e of head.entries) { try { const vec = buf.slice(base + e.o, base + e.o + e.n); await DB.put('meta', e.m.id, e.m); await DB.put('vecs', e.m.id, vec); L.add(e.m, new Float32Array(vec)); n++; } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
+      const base = 12 + hlen; let n = 0, failed = 0, firstErr = '', kept = 0;
+      for (const e of head.entries) { try { const vec = buf.slice(base + e.o, base + e.o + e.n); const local = L.meta.get(e.m.id);
+        if (local) { // already here: the backup refreshes the vector, never the present — the local record (above all its bin status, a decision made after the backup was) is kept exactly as it stands (R2-D4)
+          await DB.put('vecs', e.m.id, vec);
+          if (!local.fromBak) { await DB.put('meta', e.m.id, { ...local, fromBak: true }); local.fromBak = true; }
+          L.add(local, new Float32Array(vec)); n++; kept++; continue; }
+        const m = { ...e.m, fromBak: true }; // brought in by this restore — and only records a restore brought in may be adopted later (R2-D9)
+        await DB.put('meta', e.m.id, m); await DB.put('vecs', e.m.id, vec); L.add(m, new Float32Array(vec)); n++; } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
       let nc = 0, skippedC = 0, failedC = 0;
       for (const [id, c] of head.colls || []) { if (L.colls.has(id)) { skippedC++; continue; } try { await DB.put('colls', id, c); L.colls.set(id, c); nc++; } catch { failedC++; } }
+      // Dismissed groups merge in as a union and persist, so they stay dismissed on this
+      // device too (R2-D11). Backups from before 2.62 carry no such field — nothing to merge.
+      let mergedD = 0;
+      if (Array.isArray(head.dismissed)) { try { for (const k of head.dismissed) if (typeof k === 'string' && !Dups.dismissed.has(k)) { Dups.dismissed.add(k); mergedD++; } if (mergedD) { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-10000))); } catch {} } Log.add('info', 'dismissed groups restored from backup', mergedD); } } catch {} }
       if (!n && !nc && failed) { Log.add('ERR', 'restore failed', firstErr); return toast('Could not restore that backup: ' + firstErr, 6000); }
       if (n || nc) { this.on = true; this.pool = null; try { await DB.put('kv', 'adoptPool', true); } catch {} }
       UI.binCount(); UI.renderIndex(); if (cur === 'lib') renderLib();
       const cbit = (nc || skippedC) ? `, ${fmtN(nc)} collection${nc === 1 ? '' : 's'}${skippedC ? ` (${fmtN(skippedC)} already here and kept)` : ''}` : '';
-      if (failed || failedC) { Log.add('ERR', 'restore partial', failed + failedC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}. ${fmtN(failed + failedC)} item${failed + failedC === 1 ? '' : 's'} could not be written${firstErr ? ` (${firstErr})` : ''}. What did restore is ready to use.`, 9000); }
-      else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}. Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
+      const kbit = kept ? ` ${fmtN(kept)} of them ${kept === 1 ? 'was' : 'were'} already here — ${kept === 1 ? 'its' : 'their'} current state (the bin included) was kept, not rewound.` : '';
+      if (failed || failedC) { Log.add('ERR', 'restore partial', failed + failedC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit} ${fmtN(failed + failedC)} item${failed + failedC === 1 ? '' : 's'} could not be written${firstErr ? ` (${firstErr})` : ''}. What did restore is ready to use.`, 9000); }
+      else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
     } catch (e) { Log.add('ERR', 'restore failed', e.message); toast('Could not restore that backup: ' + e.message, 6000); }
   },
   async buildPool() {
@@ -648,7 +664,10 @@ const Backup = {
     this.pool = new Map();
     const vecIds = new Set(await new Promise((res, rej) => { const q = DB.tx(['vecs']).objectStore('vecs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }));
     const seen = new Set();
-    for (const m of L.meta.values()) { if (!vecIds.has(m.id) || !m.name) continue; seen.add(m.id); for (const k of [`p:${(m.path || []).join('/')}/${m.name}:${m.size}`, `n:${m.name}:${m.size}`]) { if (!this.pool.has(k)) this.pool.set(k, []); this.pool.get(k).push(m); } }
+    // The pool is the backup's scope, not the library's: only records a restore brought in
+    // (stamped fromBak) may be adopted. A record Iris indexed itself — above all a binned
+    // one — is not the backup's to give away (R2-D9).
+    for (const m of L.meta.values()) { if (!vecIds.has(m.id) || !m.name || !m.fromBak) continue; seen.add(m.id); for (const k of [`p:${(m.path || []).join('/')}/${m.name}:${m.size}`, `n:${m.name}:${m.size}`]) { if (!this.pool.has(k)) this.pool.set(k, []); this.pool.get(k).push(m); } }
     this.left = seen.size;
   },
   consume(m) { if (!this.pool) return; for (const list of this.pool.values()) { const i = list.indexOf(m); if (i >= 0) list.splice(i, 1); } if (--this.left <= 0) { this.on = false; DB.put('kv', 'adoptPool', false); } },
@@ -662,20 +681,30 @@ const Backup = {
       await this.buildPool();
       const file = spec.file ?? (spec.getFile ? await spec.getFile() : null); if (!file) return false;
       const pk = `p:${(spec.path || []).join('/')}/${spec.name}:${file.size}`, nk = `n:${spec.name}:${file.size}`;
-      // Strongest evidence first: a record whose mtime matches the file's exactly wins. On the
-      // name-only fallback, a record whose known mtime DISAGREES with the file's is vetoed —
-      // name+size alone (every camera roll starts at IMG_0001.jpg) must not hand a genuinely
-      // new photo another photo's vector.
+      // Strongest evidence first: a record whose mtime matches the file's exactly wins. On
+      // EVERY key, a record whose known mtime DISAGREES with the file's is vetoed — no key
+      // is exempt, because a picked file's path is empty and its "path key" is name+size in
+      // disguise; name+size alone (every camera roll starts at IMG_0001.jpg) must not hand
+      // a genuinely new photo another photo's vector (D-1, R2-D1).
       const fm = file.lastModified || 0;
       const pickFrom = (list, veto) => { if (!list) return null; for (const c of list) if (fm && c.mtime && c.mtime === fm) return c; for (const c of list) { if (!fm || !c.mtime) return c; if (!veto) return c; } return null; };
-      const cand = pickFrom(this.pool.get(pk), false) || pickFrom(this.pool.get(nk), true); if (!cand || cand.id === spec.id) return false;
+      const cand = pickFrom(this.pool.get(pk), true) || pickFrom(this.pool.get(nk), true); if (!cand || cand.id === spec.id) return false;
       const buf = await DB.get('vecs', cand.id); if (!buf) { this.consume(cand); return false; }
       this.consume(cand);
-      const m = { ...cand, id: spec.id, name: spec.name, path: spec.path || [], folder: spec.folder ?? null, src: spec.src, size: file.size, mtime: file.lastModified || cand.mtime };
-      await DB.put('meta', m.id, m); await DB.put('vecs', m.id, buf);
-      await DB.del('meta', cand.id); await DB.del('vecs', cand.id); await DB.del('thumbs', cand.id);
+      // Born live, and born its own record: the adopted photo never inherits the candidate's
+      // bin status (a decision made about a different record) nor its backup stamp (R2-D9).
+      const m = { ...cand, id: spec.id, name: spec.name, path: spec.path || [], folder: spec.folder ?? null, src: spec.src, size: file.size, mtime: file.lastModified || cand.mtime, status: null };
+      delete m.fromBak;
+      // One transaction for the whole swap: it lands completely or not at all, so a failure
+      // can never leave the same vector durably stored under two ids — and a swap that did
+      // land is never reported as a failure (R2-D6).
+      await DB.swapItem(m, buf, cand.id);
       L.meta.delete(cand.id); L.add(m, new Float32Array(buf)); L.rebuild();
       for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { c.ids[i] = m.id; DB.put('colls', c.id, c); } }
+      // An identity died and another was born at the same count: the count-keyed Junk and
+      // Sugg caches must hear about the swap, the same discipline as setStatus (R2-D3).
+      if (typeof Junk !== 'undefined') Junk.cache = null;
+      if (typeof Sugg !== 'undefined') Sugg.cache = null;
       if (spec.session) L.session.set(m.id, file);
       ThumbFix.add(m.id, spec.getFile ?? (async () => file));
       Log.add('info', 'adopted from backup', spec.name);
@@ -1211,7 +1240,10 @@ const Indexer = {
   },
   async start() {
     if (this.running) { UI.renderIndex(); return; }
-    if (!this.queue.length && !this.scanning) { UI.indexStatus(''); UI.refreshAll(); return; }
+    // A pure-adoption pass arrives here with an empty queue — identities changed without
+    // anything being processed — so the caches are dropped here too, not only at the end
+    // of a full run below (R2-D3).
+    if (!this.queue.length && !this.scanning) { Junk.cache = null; Sugg.cache = null; UI.indexStatus(''); UI.refreshAll(); return; }
     if (!(await ensureAI())) { Dups.groups = null; UI.renderIndex(); toast(`${this.queue.length} photos are waiting for the AI.`); return; }
     this.running = true; this.paused = false; this.done = 0; this.total = this.queue.length; this.skipped = 0; this.t0 = performance.now(); Log.add('info', 'index start', this.queue.length, 'queued');
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
