@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.65';
+const VER = 'Iris 2.66';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -543,7 +543,9 @@ const DB = {
    which all select ids from L. This is the one path that can see them, so it is fenced:
    an id is collected only if it is not in L (no complete pair) and not queued with the
    indexer; the folder-removal call is scoped to that folder's id prefix and stands down
-   entirely while a run is in flight, so a record mid-birth is never eaten. */
+   entirely while a run is in flight, so a record mid-birth is never eaten. Restore's
+   births are fenced by the same membership: a restored record is added to L before its
+   first durable write, so it is never collectable mid-birth either (R3-D7). */
 async function sweepOrphans(onlyFolder = null) {
   if (onlyFolder && Indexer.running) return 0;
   try {
@@ -664,27 +666,53 @@ const Backup = {
       const hlen = new DataView(buf).getUint32(8, true); const head = JSON.parse(new TextDecoder().decode(u.subarray(12, 12 + hlen)));
       if (head.kind !== 'index-backup') return toast('That is not an Iris backup file.', 5000);
       if (head.dim !== DIM) return toast('This backup came from a different AI model and cannot be restored here.', 6000);
-      const base = 12 + hlen; let n = 0, failed = 0, firstErr = '', kept = 0;
-      for (const e of head.entries) { try { const vec = buf.slice(base + e.o, base + e.o + e.n); const local = L.meta.get(e.m.id);
+      const base = 12 + hlen; let n = 0, failed = 0, firstErr = '', kept = 0, gone = 0, bad = 0; const badNames = [];
+      // The durable trace of candidates an earlier adoption on THIS device already consumed
+      // (R3-D2): their entries must not be written back as phantom duplicates.
+      const consumed = await this.adoptedIds();
+      for (const e of head.entries) { try {
+        // Every entry is validated BEFORE anything is written (R3-D1): its vector must be
+        // exactly one model's worth of bytes lying inside the file. A damaged entry is
+        // skipped and named — never installed, never counted a success. Before this, a
+        // short or misaligned vector was written first and only threw afterwards, and
+        // the poisoned record killed the NEXT launch in its load loop, beyond recovery.
+        if (!e || !e.m || typeof e.m.id !== 'string' || !Number.isInteger(e.o) || !Number.isInteger(e.n) || e.o < 0 || e.n !== DIM * 4 || base + e.o + e.n > buf.byteLength) { bad++; badNames.push(e?.m?.name || e?.m?.id || 'an unnamed photo'); continue; }
+        const vec = buf.slice(base + e.o, base + e.o + e.n); const local = L.meta.get(e.m.id);
         if (local) { // already here: the backup refreshes the vector, never the present — the local record (above all its bin status, a decision made after the backup was) is kept exactly as it stands (R2-D4)
           await DB.put('vecs', e.m.id, vec);
           if (!local.fromBak) { await DB.put('meta', e.m.id, { ...local, fromBak: true }); local.fromBak = true; }
           L.add(local, new Float32Array(vec)); n++; kept++; continue; }
+        if (consumed.has(e.m.id)) { gone++; continue; } // already matched into this device by an earlier adoption — writing it back would duplicate the adopted photo under the old device's folder (R3-D2)
         const m = { ...e.m, fromBak: true }; // brought in by this restore — and only records a restore brought in may be adopted later (R2-D9)
-        await DB.put('meta', e.m.id, m); await DB.put('vecs', e.m.id, vec); L.add(m, new Float32Array(vec)); n++; } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
-      let nc = 0, skippedC = 0, failedC = 0;
-      for (const [id, c] of head.colls || []) { if (L.colls.has(id)) { skippedC++; continue; } try { await DB.put('colls', id, c); L.colls.set(id, c); nc++; } catch { failedC++; } }
+        // Born in L BEFORE its first durable write (R3-D7): the orphan sweep's fence is L
+        // membership, so a record being restored can never be collected mid-birth; if a
+        // write fails, the birth is rolled back out of L and the entry counts as failed.
+        L.add(m, new Float32Array(vec));
+        try { await DB.put('meta', e.m.id, m); await DB.put('vecs', e.m.id, vec); } catch (err) { L.meta.delete(e.m.id); L.rebuild(); throw err; }
+        n++; } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
+      let nc = 0, skippedC = 0, failedC = 0, badC = 0;
+      // The collections tail is parsed defensively, entry by entry (R3-D4): a malformed
+      // entry is skipped and counted — it must never throw into the outer catch and report
+      // a landed restore as a total failure, nor cost the photos their adoption window.
+      if (Array.isArray(head.colls)) for (const pair of head.colls) { const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; if (typeof id !== 'string' || !c || typeof c !== 'object') { badC++; continue; } if (L.colls.has(id)) { skippedC++; continue; } try { await DB.put('colls', id, c); L.colls.set(id, c); nc++; } catch { failedC++; } }
+      else if (head.colls != null) badC++;
       // Dismissed groups merge in as a union and persist, so they stay dismissed on this
       // device too (R2-D11). Backups from before 2.62 carry no such field — nothing to merge.
       let mergedD = 0;
       if (Array.isArray(head.dismissed)) { try { for (const k of head.dismissed) if (typeof k === 'string' && !Dups.dismissed.has(k)) { Dups.dismissed.add(k); mergedD++; } if (mergedD) { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-10000))); } catch {} } Log.add('info', 'dismissed groups restored from backup', mergedD); } } catch {} }
-      if (!n && !nc && failed) { Log.add('ERR', 'restore failed', firstErr); return toast('Could not restore that backup: ' + firstErr, 6000); }
+      if (!n && !nc && (failed || bad)) { Log.add('ERR', 'restore failed', firstErr || 'damaged entries'); return toast('Could not restore that backup: ' + (firstErr || 'part of the backup was damaged'), 6000); }
       if (n || nc) { this.on = true; this.pool = null; try { await DB.put('kv', 'adoptPool', true); } catch {} }
+      if (gone) Log.add('info', 'restore skipped photos already matched into this device', gone);
+      if (badNames.length) Log.add('ERR', 'restore skipped damaged backup entries', badNames.join(', '));
+      if (badC) Log.add('ERR', 'restore skipped damaged collection entries', badC);
       UI.binCount(); UI.renderIndex(); if (cur === 'lib') renderLib();
       const cbit = (nc || skippedC) ? `, ${fmtN(nc)} collection${nc === 1 ? '' : 's'}${skippedC ? ` (${fmtN(skippedC)} already here and kept)` : ''}` : '';
       const kbit = kept ? ` ${fmtN(kept)} of them ${kept === 1 ? 'was' : 'were'} already here — ${kept === 1 ? 'its' : 'their'} current state (the bin included) was kept, not rewound.` : '';
-      if (failed || failedC) { Log.add('ERR', 'restore partial', failed + failedC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit} ${fmtN(failed + failedC)} item${failed + failedC === 1 ? '' : 's'} could not be written${firstErr ? ` (${firstErr})` : ''}. What did restore is ready to use.`, 9000); }
-      else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
+      const gbit = gone ? ` ${fmtN(gone)} photo${gone === 1 ? '' : 's'} in it had already been matched into this device from this backup before, so ${gone === 1 ? 'it was' : 'they were'} not brought back as ${gone === 1 ? 'a duplicate' : 'duplicates'}.` : '';
+      const wbit = (failed || failedC) ? ` ${fmtN(failed + failedC)} item${failed + failedC === 1 ? '' : 's'} could not be written${firstErr ? ` (${firstErr})` : ''}.` : '';
+      const dbit = (bad || badC) ? ` ${fmtN(bad + badC)} damaged item${bad + badC === 1 ? '' : 's'} ${bad + badC === 1 ? 'was' : 'were'} skipped${badNames.length ? ` (${badNames.slice(0, 3).join(', ')}${badNames.length > 3 ? ', …' : ''})` : ''}.` : '';
+      if (failed || failedC || bad || badC) { Log.add('ERR', 'restore partial', failed + failedC + bad + badC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit}${gbit}${wbit}${dbit} What did restore is ready to use.`, 9000); }
+      else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit}${gbit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
     } catch (e) { Log.add('ERR', 'restore failed', e.message); toast('Could not restore that backup: ' + e.message, 6000); }
   },
   async buildPool() {
@@ -699,6 +727,14 @@ const Backup = {
     this.left = seen.size;
   },
   consume(m) { if (!this.pool) return; for (const list of this.pool.values()) { const i = list.indexOf(m); if (i >= 0) list.splice(i, 1); } if (--this.left <= 0) { this.on = false; DB.put('kv', 'adoptPool', false); } },
+  // The durable trace of candidates adoption has already consumed on this device
+  // (R3-D2): a Set of candidate ids in kv, capped like the dismissed-groups set. A
+  // re-restore consults it and never writes a consumed candidate back — the adopted
+  // photo already lives here under this device's own id, and the backup entry would
+  // return as a phantom duplicate on the old device's (nonexistent) folder. A device
+  // that never adopted has no trace and restores everything, exactly as before.
+  async adoptedIds() { if (this._adopted) return this._adopted; let a = null; try { a = await DB.get('kv', 'adoptedFrom'); } catch {} this._adopted = new Set(Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []); return this._adopted; },
+  async noteConsumed(id) { try { const s = await this.adoptedIds(); if (s.has(id)) return; s.add(id); await DB.put('kv', 'adoptedFrom', [...s].slice(-25000)); } catch {} }, // best-effort: a trace that fails to persist must never fail a swap that already landed
   // The adoption window belongs to the restore that opened it: once the post-restore check/index
   // has run (Indexer calls this), it closes — it must not stay armed for every future photo.
   disarm() { if (!this.on) return; this.on = false; this.pool = null; this.left = 0; DB.put('kv', 'adoptPool', false).catch(() => {}); Log.add('info', 'backup adoption window closed'); },
@@ -718,7 +754,12 @@ const Backup = {
       const pickFrom = (list, veto) => { if (!list) return null; for (const c of list) if (fm && c.mtime && c.mtime === fm) return c; for (const c of list) { if (!fm || !c.mtime) return c; if (!veto) return c; } return null; };
       const cand = pickFrom(this.pool.get(pk), true) || pickFrom(this.pool.get(nk), true); if (!cand || cand.id === spec.id) return false;
       const buf = await DB.get('vecs', cand.id); if (!buf) { this.consume(cand); return false; }
-      this.consume(cand);
+      // The D-8 tombstone is re-checked HERE, after every await (R3-D3): if the folder
+      // was removed while the file was being read, the adoption must not land after the
+      // removal and its sweep — that record would be a complete pair on a folder that no
+      // longer exists, collectable by no fence. The candidate is NOT consumed: it stays
+      // in the pool for whatever folder state comes next.
+      if (spec.folder && typeof Indexer !== 'undefined' && Indexer.removed?.has(spec.folder)) { Log.add('info', 'adoption stopped: its folder was removed while the photo was being read', spec.name); return false; }
       // Born live, and born its own record: the adopted photo never inherits the candidate's
       // bin status (a decision made about a different record) nor its backup stamp (R2-D9).
       const m = { ...cand, id: spec.id, name: spec.name, path: spec.path || [], folder: spec.folder ?? null, src: spec.src, size: file.size, mtime: file.lastModified || cand.mtime, status: null };
@@ -727,6 +768,11 @@ const Backup = {
       // can never leave the same vector durably stored under two ids — and a swap that did
       // land is never reported as a failure (R2-D6).
       await DB.swapItem(m, buf, cand.id);
+      // The candidate is spent only now that the swap has landed (R3-D6): a failed swap
+      // used to consume it anyway — evicting it for the session and, at left zero,
+      // durably disarming the whole window over one transient storage error.
+      this.consume(cand);
+      await this.noteConsumed(cand.id); // the durable trace a future re-restore consults (R3-D2)
       L.meta.delete(cand.id); L.add(m, new Float32Array(buf)); L.rebuild();
       for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { c.ids[i] = m.id; DB.put('colls', c.id, c); } }
       // An identity died and another was born at the same count: the count-keyed Junk and
@@ -1253,19 +1299,23 @@ const Folders = {
     const ids = L.ids.filter((id) => L.meta.get(id)?.folder === f.id); await DB.removeItems(ids); ids.forEach((id) => L.meta.delete(id)); L.rebuild();
     await DB.del('folders', f.id); L.folders.delete(f.id); await sweepOrphans(f.id); UI.refreshAll(); toast(`Removed ${f.name} from Iris. Your files are untouched.`);
   },
-  stats: { skippedTypes: {}, dirErrors: 0, hidden: 0 },
-  async *walk(dir, path = [], skip = []) {
+  stats: { skippedTypes: {}, dirErrors: 0, hidden: 0, trees: 0 },
+  async *walk(dir, path = [], skip = [], countKey = null) {
     try {
       for await (const [name, h] of dir.entries()) {
-        if (name.startsWith('.')) { this.stats.hidden++; continue; } // dot entries stay skipped by design — but counted, so the scan-end summary can say they were passed over (R2-D5)
-        if (h.kind === 'directory') { if (/^(cache|trash)$/i.test(name) || (NATIVE && dir.__native === Nat.root && name === 'Android')) continue;
+        if (countKey) { // inside a subtree the scan passes over by policy: yield nothing, but count EVERY entry, so the summary can say how much was passed over (R3-D5)
+          this.stats[countKey] = (this.stats[countKey] || 0) + 1;
+          if (h.kind === 'directory') { let linked = false; for (const o of skip) { try { if (await h.isSameEntry(o)) { linked = true; break; } } catch {} } if (!linked) yield* this.walk(h, [...path, name], skip, countKey); }
+          continue; }
+        if (name.startsWith('.')) { if (h.kind === 'directory') yield* this.walk(h, [...path, name], skip, 'hidden'); else this.stats.hidden = (this.stats.hidden || 0) + 1; continue; } // dot entries stay skipped by design — but counted, a hidden subtree by its whole entry count, so the scan-end summary can say what was passed over (R2-D5, R3-D5)
+        if (h.kind === 'directory') { if (/^(cache|trash)$/i.test(name) || (NATIVE && dir.__native === Nat.root && name === 'Android')) { yield* this.walk(h, [...path, name], skip, 'trees'); continue; } // cache/trash subtrees are passed over too — and counted like every other skip class (R3-D5)
           let linked = false; for (const o of skip) { try { if (await h.isSameEntry(o)) { linked = true; break; } } catch {} }
           if (linked) continue; // a subfolder that is itself a linked Iris folder is covered by its own check — descending here would index its photos twice (D-7)
           yield* this.walk(h, [...path, name], skip); }
         else if (IMG_RE.test(name)) yield { h, path, name };
         else { const ext = (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || '?').toLowerCase(); this.stats.skippedTypes[ext] = (this.stats.skippedTypes[ext] || 0) + 1; }
       }
-    } catch (e) { if (!path.length) throw e; this.stats.dirErrors++; console.warn('Could not read folder', path.join('/'), e); }
+    } catch (e) { if (countKey) return; if (!path.length) throw e; this.stats.dirErrors++; console.warn('Could not read folder', path.join('/'), e); } // a subtree being counted only is never a scan error: what could be counted, was
   },
   async fileFor(id, ask = true) {
     if (L.session.has(id)) return L.session.get(id);
@@ -1278,6 +1328,7 @@ const Folders = {
 /* ---------------- Indexer ---------------- */
 const Indexer = {
   queue: [], queued: new Set(), removed: new Set(), running: false, paused: false, done: 0, total: 0, skipped: 0, t0: 0, cur: '', wake: null,
+  epoch: 0, inflight: false, // Erase's fence (R2-DS1): eraseIndex bumps the epoch and waits out inflight before clearing
   scanning: '', found: 0,
   speed: localStorage.getItem('iris.speed') || 'gentle', // gentle: AI uses ~25% of the GPU, balanced ~50%, fast 100%
   REST: { gentle: 3, balanced: 1, fast: 0 },
@@ -1301,7 +1352,7 @@ const Indexer = {
       if (!(await Folders.perm(f, 'read', false))) { toast(`Skipped ${f.name}: no access. Tap Continue to allow it.`, 4500); Log.add('warn', 'scan skipped, no access', f.name); continue; }
       walked = true;
       DB.put('kv', 'pendingScan', true); this.scanning = f.name; this.curF = f; this.found = 0; toast(f.lastScan ? `Checking ${f.name} again. Last checked ${fmtAgo(f.lastScan)}, ${fmtN(f.count || 0)} photos.` : `Reading ${f.name}…`, 3500); if (cur === 'lib') renderLib(); UI.renderIndex(); Log.add('info', 'scan start', f.name);
-      Folders.stats = { skippedTypes: {}, dirErrors: 0, hidden: 0 }; const tS = performance.now();
+      Folders.stats = { skippedTypes: {}, dirErrors: 0, hidden: 0, trees: 0 }; const tS = performance.now();
       const seen = new Set(); let ok = true, fresh = 0, adopted = 0;
       try {
         const others = [...L.folders.values()].filter((o) => o.id !== f.id).map((o) => o.handle); // the other linked folders: this walk must not descend into their subtrees (D-7)
@@ -1316,7 +1367,7 @@ const Indexer = {
           if (this.found % 100 === 0) { UI.renderIndex(); await sleep(0); }
         }
       } catch (err) { ok = false; console.error('scan failed', f.name, err); toast('Couldn’t read ' + f.name + ': ' + err.message + '. Tap Start to reconnect it.', 6000); }
-      const st = Folders.stats; Log.add('info', `scan end ${f.name}: ${this.found} photos, ${fresh} new, ${Math.round(performance.now() - tS)} ms, dir errors ${st.dirErrors}${st.hidden ? `, ${st.hidden} hidden skipped` : ''}, other files`, st.skippedTypes);
+      const st = Folders.stats; Log.add('info', `scan end ${f.name}: ${this.found} photos, ${fresh} new, ${Math.round(performance.now() - tS)} ms, dir errors ${st.dirErrors}${st.hidden ? `, ${st.hidden} hidden skipped` : ''}${st.trees ? `, ${st.trees} in cache/trash folders skipped` : ''}, other files`, st.skippedTypes);
       if (st.dirErrors) ok = false; // don’t forget photos from folders we couldn’t read
       if (ok && !this.removed.has(f.id)) { // forget photos that were deleted outside Iris (and never resurrect a removed folder)
         const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
@@ -1362,14 +1413,19 @@ const Indexer = {
       if (!job) continue; this.queued.delete(job.id);
       if (job.base?.folder && this.removed.has(job.base.folder)) { this.skipped++; this.done++; Work.update(this.done, this.total); continue; } // its folder was removed: never save it back
       if (!job.p) { this.skipped++; this.done++; Work.update(this.done, this.total); if (this.skipped <= 5) Log.add('warn', 'could not open/decode', job.base.name, job.err || ''); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; this.queue.unshift(job); this.done--; this.skipped--; toast('Iris can\u2019t open these photos (' + (job.err || 'unknown') + '). Paused so nothing is wasted. Library \u2192 Diagnostics \u2192 Copy report.', 9000); UI.renderIndex(); } else if (this.done % 5 === 0) UI.renderIndex(); continue; }
+      this.inflight = true; const ep = this.epoch; // the epoch this job was taken under: if Erase moves it while the job is in hand, the job's save must never land (R2-DS1)
       try {
         const tA = performance.now(); const vec = await AI.image(job.p.bytes); const rest = (performance.now() - tA) * this.REST[this.speed];
-        const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, mtime: job.base.mtime || job.file?.lastModified || Date.now(), status: null, at: Date.now() };
-        let saved = true;
-        try { await DB.saveItem(m, job.p.thumb, vec); } catch (e) { saved = false; this.skipped++; if (this.skipped <= 5) console.error('Save failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('Iris couldn\u2019t save these photos (' + e.message + '). Storage may be full. Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
-        if (saved) { L.add(m, vec); this.cur = job.base.id; }
+        if (ep !== this.epoch) Log.add('info', 'a photo finished after Erase began and was dropped, not saved', job.base.name); // the index it would have been saved into no longer exists
+        else {
+          const m = { ...job.base, w: job.p.w, h: job.p.h, bright: job.p.bright, sharp: job.p.sharp, dh: job.p.dh, size: job.base.size || job.file?.size || 0, mtime: job.base.mtime || job.file?.lastModified || Date.now(), status: null, at: Date.now() };
+          let saved = true;
+          try { await DB.saveItem(m, job.p.thumb, vec); } catch (e) { saved = false; this.skipped++; if (this.skipped <= 5) console.error('Save failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('Iris couldn\u2019t save these photos (' + e.message + '). Storage may be full. Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
+          if (saved) { L.add(m, vec); this.cur = job.base.id; }
+        }
         if (rest > 0) await sleep(Math.min(rest, 4000)); // let the GPU breathe so the phone stays smooth
       } catch (e) { this.skipped++; if (this.skipped <= 5) console.error('AI failed on', job.base.name, e); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; toast('The AI is failing on every photo (' + e.message + '). Paused. Library → Diagnostics has details.', 8000); UI.renderIndex(); } }
+      this.inflight = false;
       this.done++;
       if (this.done % 5 === 0 || !this.queue.length) { UI.renderIndex(); Work.update(this.done, this.total); }
       if (L.count <= 12 || (L.count < 60 && this.done % 12 === 0)) UI.refreshLight(); else if (this.done % 10 === 0) UI.newChip();
@@ -2020,7 +2076,7 @@ async function renderLib() {
     h('div', { class: 'kv' }, h('span', {}, 'Collections'), h('span', {}, fmtN(L.colls.size))),
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Tips: search in any language, like “mi perro en la playa”. Add a minus to exclude: “beach -people”. Long-press a photo to select several.'),
     ...(Dups.dismissed.size ? [h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm', onclick: () => { localStorage.removeItem('iris-dismissed'); Dups.dismissed.clear(); Dups.groups = null; toast('Hidden groups reset — Clean will regroup your duplicates.'); renderLib(); } }, 'Reset hidden groups'), h('span', { class: 'small', style: 'margin-left:8px' }, fmtN(Dups.dismissed.size) + ' duplicate groups are hidden for good (Keep all).'))] : []),
-    h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections, folder links and hidden duplicate groups. Your photos are not touched.', 'Erase', true)) { await DB.clear(); localStorage.removeItem('iris-dismissed'); location.reload(); } } }, 'Erase index'))));
+    h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections, folder links and hidden duplicate groups. Your photos are not touched.', 'Erase', true)) { await eraseIndex(); } } }, 'Erase index'))));
   b.append(h('div', { style: 'text-align:center;color:var(--dim);font-size:12px;padding:14px 0 2px;letter-spacing:.3px' }, VER));
 }
 
@@ -2103,6 +2159,30 @@ $('#obSkip').onclick = () => { localStorage.setItem('iris-ob', '1'); $('#onboard
    store — boot must not die into a zombie shell whose only advice points at a Library behind
    the same dead boot. Say what happened and offer the two honest exits: try again, or erase
    the index (the recovery the Library's own Erase performs) and let Iris rebuild it. */
+/* Erase's fence (R2-DS1): the Library's Erase used to clear the database while the
+   indexer might still be holding a photo in the AI — the clear committed, the reload
+   was requested, and when the AI answer landed in the teardown window the loop saved
+   a complete record into the freshly cleared index: a zombie whose folder was gone,
+   loadable at every boot, openable by nothing. Erase therefore stops the indexer
+   FIRST, in an order that makes the zombie impossible, not unlikely: the epoch bump
+   means any job in flight drops its save when its answer lands (the loop checks the
+   epoch it was taken under before it writes); paused + an emptied queue mean no new
+   job starts; tombstoning every folder stops an in-flight check at its next photo
+   and aborts an in-flight adoption at its re-check (R3-D3); and the bounded wait
+   lets a save already in flight settle, so the clear never races a committing
+   write. Only then does the clear run, and the reload follows it. */
+async function eraseIndex() {
+  Indexer.epoch++;
+  Indexer.paused = true;
+  Indexer.queue.length = 0; Indexer.later = [];
+  for (const f of L.folders.values()) Indexer.removed.add(f.id);
+  let waited = 0;
+  while (Indexer.inflight && waited < 15000) { await sleep(50); waited += 50; }
+  if (Indexer.inflight) Log.add('warn', 'erase proceeded while a photo was still being understood; its save is fenced by the epoch and will be dropped');
+  await DB.clear();
+  localStorage.removeItem('iris-dismissed');
+  location.reload();
+}
 function bootRecovery(e) {
   Log.add('ERR', 'boot stopped: the index would not open', e);
   let gone = false; const reload = () => { if (!gone) { gone = true; location.reload(); } };
@@ -2163,7 +2243,12 @@ function bootRecovery(e) {
   const slowTimer = setTimeout(() => { openSlow = true; const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; bootRecovery(e); openP.then(() => location.reload(), () => {}); }, 6000);
   try { await openP; clearTimeout(slowTimer); if (openSlow) return; } catch (e) { clearTimeout(slowTimer); if (openSlow) return; bootRecovery(e); return; }
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
-  for (const [id, buf] of vecs) { const m = metas.get(id); if (m) L.add(m, new Float32Array(buf)); }
+  // A stored vector that is not exactly one model's worth of bytes is damaged goods
+  // (a pre-2.66 restore could install one): skip it and say so, never throw — this loop
+  // sits outside the DB.open recovery, so a throw here was a permanent zombie shell
+  // (R3-D1, defence in depth). The skipped record stays out of L, so the orphan sweep
+  // below disposes of it and the photo is understood again at its next folder check.
+  for (const [id, buf] of vecs) { const m = metas.get(id); if (!m) continue; if (!buf || buf.byteLength !== DIM * 4) { Log.add('ERR', 'a stored photo vector was damaged and was left out; it will be understood again when its folder is checked', id); continue; } L.add(m, new Float32Array(buf)); }
   for (const [id, f] of await DB.all('folders')) { if (f.handle?.__native) Object.setPrototypeOf(f.handle, NDir.prototype); L.folders.set(id, f); }
   if (NATIVE && !Nat.has()) Nat.ask();
   for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
