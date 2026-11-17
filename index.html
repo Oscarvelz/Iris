@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.68';
+const VER = 'Iris 2.69';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -641,7 +641,7 @@ const Backup = {
   async export() {
     const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs'); const colls = await DB.all('colls');
     const entries = []; const parts = []; let off = 0;
-    for (const [id, buf] of vecs) { const m = metas.get(id); if (!m || !buf) continue; entries.push({ m, o: off, n: buf.byteLength }); parts.push(new Uint8Array(buf)); off += buf.byteLength; }
+    for (const [id, buf] of vecs) { const m = metas.get(id); if (!m || !buf) continue; if (buf.byteLength !== DIM * 4) { Log.add('warn', 'backup skipped a photo whose stored vector is damaged', m.name || id); continue; } entries.push({ m, o: off, n: buf.byteLength }); parts.push(new Uint8Array(buf)); off += buf.byteLength; }
     if (!entries.length) { toast('Nothing to back up yet — Iris has not understood any photo.'); return; }
     // The dismissed duplicate groups are a user decision like the bin: they ride along
     // (an additive field — older Iris versions simply ignore it), so a device move does
@@ -681,30 +681,57 @@ const Backup = {
       const hlen = new DataView(buf).getUint32(8, true); const head = JSON.parse(new TextDecoder().decode(u.subarray(12, 12 + hlen)));
       if (head.kind !== 'index-backup') return toast('That is not an Iris backup file.', 5000);
       if (head.dim !== DIM) return toast('This backup came from a different AI model and cannot be restored here.', 6000);
-      const base = 12 + hlen; let n = 0, failed = 0, firstErr = '', kept = 0, gone = 0, bad = 0; const badNames = [];
+      const base = 12 + hlen; let n = 0, failed = 0, firstErr = '', kept = 0, gone = 0, bad = 0, dup = 0; const badNames = [];
+      // Erase's fence reaches this writer too (R4-D2): eraseIndex bumps Indexer.epoch, and
+      // a restore that began before the bump must stop at its next write, take back what
+      // it wrote after the clear, and never arm the adoption window inside an erased index.
+      const eraseEp = (typeof Indexer !== 'undefined' && typeof Indexer.epoch === 'number') ? Indexer.epoch : null;
+      const erased = () => eraseEp !== null && typeof Indexer !== 'undefined' && Indexer.epoch !== eraseEp;
+      const wrote = []; let aborted = false;
       // The durable trace of candidates an earlier adoption on THIS device already consumed
-      // (R3-D2): their entries must not be written back as phantom duplicates.
-      const consumed = await this.adoptedIds();
+      // (R3-D2): their entries must not be written back as phantom duplicates. It is re-read
+      // from the store, never served from this session's cache: another tab may have adopted
+      // since this tab first looked, and the durable record is the only truth both tabs
+      // share (R4-D5).
+      const consumed = await this.adoptedIds(true);
+      // The trace's cap stops being load-bearing (R4-D6): a photo adopted on this device
+      // lives in L under this device's id with the same name, size and vector, so an entry
+      // matching a live record on all three is that photo's duplicate whether or not the
+      // trace still remembers consuming its candidate. (A false match costs a reprocess at
+      // the next folder check, never a photo.)
+      const vhash = (u8) => { let h = 0x811c9dc5; for (let i = 0; i < u8.length; i++) { h ^= u8[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(16); };
+      const liveKeys = new Set();
+      for (const m of L.meta.values()) { if (!m.name || typeof m.size !== 'number' || !L.rows.has(m.id)) continue; const v = L.vec(m.id); liveKeys.add(m.name + '|' + m.size + '|' + vhash(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))); }
+      const seenIds = new Set();
       for (const e of head.entries) { try {
+        if (erased()) { aborted = true; break; }
         // Every entry is validated BEFORE anything is written (R3-D1): its vector must be
         // exactly one model's worth of bytes lying inside the file. A damaged entry is
         // skipped and named — never installed, never counted a success. Before this, a
         // short or misaligned vector was written first and only threw afterwards, and
         // the poisoned record killed the NEXT launch in its load loop, beyond recovery.
-        if (!e || !e.m || typeof e.m.id !== 'string' || !Number.isInteger(e.o) || !Number.isInteger(e.n) || e.o < 0 || e.n !== DIM * 4 || base + e.o + e.n > buf.byteLength) { bad++; badNames.push(e?.m?.name || e?.m?.id || 'an unnamed photo'); continue; }
+        // The record is validated, not only its bytes (R4-D8): a photo entry must carry
+        // the fields a record needs to live — a name for the adoption pool, a size, a
+        // path, and a folder that is a folder id or the picked-photo null. A skeletal
+        // meta used to install a permanent ghost no flow could ever complete.
+        if (!e || !e.m || typeof e.m.id !== 'string' || !e.m.id || typeof e.m.name !== 'string' || !e.m.name || typeof e.m.size !== 'number' || !Number.isFinite(e.m.size) || e.m.size < 0 || !Array.isArray(e.m.path) || !(e.m.folder === null || typeof e.m.folder === 'string') || !Number.isInteger(e.o) || !Number.isInteger(e.n) || e.o < 0 || e.n !== DIM * 4 || base + e.o + e.n > buf.byteLength) { bad++; badNames.push(e?.m?.name || e?.m?.id || 'an unnamed photo'); continue; }
+        if (seenIds.has(e.m.id)) { dup++; continue; } // the same photo twice in one file is one record, counted once (R4-D8)
+        seenIds.add(e.m.id);
         const vec = buf.slice(base + e.o, base + e.o + e.n); const local = L.meta.get(e.m.id);
         if (local) { // already here: the backup refreshes the vector, never the present — the local record (above all its bin status, a decision made after the backup was) is kept exactly as it stands (R2-D4)
-          await DB.put('vecs', e.m.id, vec);
+          await DB.put('vecs', e.m.id, vec); wrote.push(e.m.id);
+          if (erased()) { aborted = true; break; }
           if (!local.fromBak) { await DB.put('meta', e.m.id, { ...local, fromBak: true }); local.fromBak = true; }
           L.add(local, new Float32Array(vec)); n++; kept++; continue; }
         if (consumed.has(e.m.id)) { gone++; continue; } // already matched into this device by an earlier adoption — writing it back would duplicate the adopted photo under the old device's folder (R3-D2)
+        if (liveKeys.has(e.m.name + '|' + e.m.size + '|' + vhash(new Uint8Array(vec)))) { gone++; continue; } // its name, size and vector already live here under this device's own id: the trace-cap backstop (R4-D6)
         const m = { ...e.m, fromBak: true }; // brought in by this restore — and only records a restore brought in may be adopted later (R2-D9)
         // Born in L BEFORE its first durable write (R3-D7): the orphan sweep's fence is L
         // membership, so a record being restored can never be collected mid-birth; if a
         // write fails, the birth is rolled back out of L and the entry counts as failed.
         L.add(m, new Float32Array(vec));
-        try { await DB.put('meta', e.m.id, m); await DB.put('vecs', e.m.id, vec); } catch (err) { L.meta.delete(e.m.id); L.rebuild(); throw err; }
-        n++; } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
+        try { await DB.put('meta', e.m.id, m); wrote.push(e.m.id); if (erased()) { aborted = true; break; } await DB.put('vecs', e.m.id, vec); } catch (err) { L.meta.delete(e.m.id); L.rebuild(); throw err; }
+        n++; if (erased()) { aborted = true; break; } } catch (err) { failed++; if (!firstErr) firstErr = err.message; } }
       // Entries landed: new records arrived and the kept ones had their vectors
       // replaced under their existing ids. Any Junk result scored across this restore
       // mixes two worlds, so the swap discipline applies — invalidate, epoch too (R3-I5).
@@ -713,8 +740,13 @@ const Backup = {
       // The collections tail is parsed defensively, entry by entry (R3-D4): a malformed
       // entry is skipped and counted — it must never throw into the outer catch and report
       // a landed restore as a total failure, nor cost the photos their adoption window.
-      if (Array.isArray(head.colls)) for (const pair of head.colls) { const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; if (typeof id !== 'string' || !c || typeof c !== 'object') { badC++; continue; } if (L.colls.has(id)) { skippedC++; continue; } try { await DB.put('colls', id, c); L.colls.set(id, c); nc++; } catch { failedC++; } }
+      const wroteC = [];
+      if (Array.isArray(head.colls)) for (const pair of head.colls) { if (erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; if (L.colls.has(id)) { skippedC++; continue; } try { await DB.put('colls', id, c); wroteC.push(id); L.colls.set(id, c); nc++; } catch { failedC++; } }
       else if (head.colls != null) badC++;
+      if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2)
+        try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } } catch {}
+        Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length);
+        return toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); }
       // Dismissed groups merge in as a union and persist, so they stay dismissed on this
       // device too (R2-D11). Backups from before 2.62 carry no such field — nothing to merge.
       let mergedD = 0;
@@ -730,7 +762,8 @@ const Backup = {
       const gbit = gone ? ` ${fmtN(gone)} photo${gone === 1 ? '' : 's'} in it had already been matched into this device from this backup before, so ${gone === 1 ? 'it was' : 'they were'} not brought back as ${gone === 1 ? 'a duplicate' : 'duplicates'}.` : '';
       const wbit = (failed || failedC) ? ` ${fmtN(failed + failedC)} item${failed + failedC === 1 ? '' : 's'} could not be written${firstErr ? ` (${firstErr})` : ''}.` : '';
       const dbit = (bad || badC) ? ` ${fmtN(bad + badC)} damaged item${bad + badC === 1 ? '' : 's'} ${bad + badC === 1 ? 'was' : 'were'} skipped${badNames.length ? ` (${badNames.slice(0, 3).join(', ')}${badNames.length > 3 ? ', …' : ''})` : ''}.` : '';
-      if (failed || failedC || bad || badC) { Log.add('ERR', 'restore partial', failed + failedC + bad + badC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit}${gbit}${wbit}${dbit} What did restore is ready to use.`, 9000); }
+      const ubit = dup ? ` ${fmtN(dup)} duplicate entr${dup === 1 ? 'y' : 'ies'} in the backup named the same photo twice and ${dup === 1 ? 'was' : 'were'} counted once.` : '';
+      if (failed || failedC || bad || badC || dup) { Log.add('ERR', 'restore partial', failed + failedC + bad + badC, firstErr); toast(`Backup partly restored: ${fmtN(n)} of ${fmtN(head.entries.length)} photos understood again${cbit}.${kbit}${gbit}${wbit}${dbit}${ubit} What did restore is ready to use.`, 9000); }
       else toast(`Backup restored: ${fmtN(n)} photo${n === 1 ? '' : 's'} understood again${cbit}.${kbit}${gbit} Now check your folders — Iris matches the photos it finds and only processes the new ones.`, 8000);
     } catch (e) { Log.add('ERR', 'restore failed', e.message); toast('Could not restore that backup: ' + e.message, 6000); }
   },
@@ -752,8 +785,19 @@ const Backup = {
   // photo already lives here under this device's own id, and the backup entry would
   // return as a phantom duplicate on the old device's (nonexistent) folder. A device
   // that never adopted has no trace and restores everything, exactly as before.
-  async adoptedIds() { if (this._adopted) return this._adopted; let a = null; try { a = await DB.get('kv', 'adoptedFrom'); } catch {} this._adopted = new Set(Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []); return this._adopted; },
-  async noteConsumed(id) { try { const s = await this.adoptedIds(); if (s.has(id)) return; s.add(id); await DB.put('kv', 'adoptedFrom', [...s].slice(-25000)); } catch {} }, // best-effort: a trace that fails to persist must never fail a swap that already landed
+  async adoptedIds(fresh = false) { if (this._adopted && !fresh) return this._adopted; let a = null; try { a = await DB.get('kv', 'adoptedFrom'); } catch {} this._adopted = new Set(Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []); return this._adopted; },
+  // noteConsumed is best-effort: a trace that fails to persist must never fail a swap
+  // that already landed. The set is re-read from the store first (R4-D5): a note written
+  // from a stale session cache would clobber another tab's consumptions wholesale.
+  async noteConsumed(id) { try { const s = await this.adoptedIds(true); if (s.has(id)) return; s.add(id); await DB.put('kv', 'adoptedFrom', [...s].slice(-25000)); } catch {} },
+  // A collection is restored only in a shape its consumers can survive (R4-D4): the
+  // envelope check alone let a 'set' with no ids array (collMembers filters it) and a
+  // 'smart' with no numeric z (openColl prints it with toFixed) be installed durably,
+  // counted as successes, and break the Collections view at every launch, with no
+  // in-app way to delete them. The shape proves the kind — an ids array of strings is
+  // a set; a full vector with a numeric z is a smart — and restore installs the proven
+  // label, because consumers dispatch on the label. Anything else is shapeless.
+  collShapeOk(c) { if (Array.isArray(c.ids)) return c.ids.every((x) => typeof x === 'string') ? 'set' : null; if (Array.isArray(c.vec) && c.vec.length === DIM && c.vec.every((v) => typeof v === 'number' && Number.isFinite(v)) && typeof c.z === 'number' && Number.isFinite(c.z)) return 'smart'; return null; },
   // The adoption window belongs to the restore that opened it: once the post-restore check/index
   // has run (Indexer calls this), it closes — it must not stay armed for every future photo.
   disarm() { if (!this.on) return; this.on = false; this.pool = null; this.left = 0; DB.put('kv', 'adoptPool', false).catch(() => {}); Log.add('info', 'backup adoption window closed'); },
@@ -791,8 +835,12 @@ const Backup = {
       // used to consume it anyway — evicting it for the session and, at left zero,
       // durably disarming the whole window over one transient storage error.
       this.consume(cand);
-      await this.noteConsumed(cand.id); // the durable trace a future re-restore consults (R3-D2)
+      // The record joins L in the same breath as the swap (R4-D7): the orphan sweep's
+      // fence is L membership, and the trace write used to sit between the landed swap
+      // and this line — a folder removal inside that one-await window let the scoped
+      // sweep eat a just-adopted record as an "orphan" while adopt reported success.
       L.meta.delete(cand.id); L.add(m, new Float32Array(buf)); L.rebuild();
+      await this.noteConsumed(cand.id); // the durable trace a future re-restore consults (R3-D2)
       for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { c.ids[i] = m.id; DB.put('colls', c.id, c); } }
       // An identity died and another was born at the same count: the count-keyed Junk and
       // Sugg caches must hear about the swap, the same discipline as setStatus (R2-D3).
@@ -1460,7 +1508,7 @@ const Indexer = {
       if (!job) continue; this.queued.delete(job.id);
       if (job.base?.folder && this.removed.has(job.base.folder)) { this.skipped++; this.done++; Work.update(this.done, this.total); continue; } // its folder was removed: never save it back
       if (!job.p) { this.skipped++; this.done++; Work.update(this.done, this.total); if (this.skipped <= 5) Log.add('warn', 'could not open/decode', job.base.name, job.err || ''); if (this.done >= 20 && this.skipped >= this.done * .9) { this.paused = true; this.queue.unshift(job); this.done--; this.skipped--; toast('Iris can\u2019t open these photos (' + (job.err || 'unknown') + '). Paused so nothing is wasted. Library \u2192 Diagnostics \u2192 Copy report.', 9000); UI.renderIndex(); } else if (this.done % 5 === 0) UI.renderIndex(); continue; }
-      this.inflight = true; const ep = this.epoch; // the epoch this job was taken under: if Erase moves it while the job is in hand, the job's save must never land (R2-DS1)
+      this.inflight = true; const ep = job.ep ?? this.epoch; // the epoch this job was prepared under (prepNext stamped it): if Erase moves it while the job is in hand — or while it was still decoding in prefetch — the job's save must never land (R2-DS1, R4-D1)
       try {
         const tA = performance.now(); const vec = await AI.image(job.p.bytes); const rest = (performance.now() - tA) * this.REST[this.speed];
         if (ep !== this.epoch) Log.add('info', 'a photo finished after Erase began and was dropped, not saved', job.base.name); // the index it would have been saved into no longer exists
@@ -1482,7 +1530,11 @@ const Indexer = {
     Junk.cache = null; Junk.epoch++; Sugg.cache = null; UI.renderIndex(); UI.refreshAll();
     toast(`Done. ${fmtN(L.count)} photos ready to search.` + (this.skipped ? ` ${fmtN(this.skipped)} couldn’t be read.` : ''), 4500);
   },
-  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file); if (!j.p) j.err = Prep.lastErr || 'decode failed'; } catch (e) { j.err = e.name + ': ' + e.message; j.p = null; } return j; })(); },
+  // prepNext stamps each job with the epoch it was PREPARED under (R4-D1): a prefetched
+  // job has left the queue, so Erase's queue-emptying cannot reach it, and the loop used
+  // to stamp it at in-hand time — after Erase's bump — so its epoch check passed by
+  // construction and its save landed in the cleared index.
+  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); j.ep = this.epoch; return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file); if (!j.p) j.err = Prep.lastErr || 'decode failed'; } catch (e) { j.err = e.name + ': ' + e.message; j.p = null; } return j; })(); },
 };
 let lastTouch = 0; for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown']) addEventListener(ev, () => { lastTouch = performance.now(); }, { passive: true, capture: true }); $('#main').addEventListener('scroll', () => { lastTouch = performance.now(); }, { passive: true });
 document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && Indexer.running && !Indexer.wake) { try { Indexer.wake = await navigator.wakeLock?.request('screen'); } catch {} } });
@@ -1819,18 +1871,25 @@ async function deleteFromDevice(ids) {
   // irreversible act in Iris, so it alone re-reads the durable record first: an id whose
   // stored status is no longer 'trash' (or whose record is gone) is spared, this tab's
   // stale copy is healed from the stored one, and the sparing is reported, never silent.
+  // And because the folder permission prompt can outwait any snapshot, each folder's
+  // photos are re-read once more after its prompt, at the point of no return (R4-D3).
   let spared = 0; const verified = [];
   for (const id of ids) { let m = null; try { m = await DB.get('meta', id); } catch {} if (m && m.status === 'trash') verified.push(id); else { spared++; if (m) { const lm = L.meta.get(id); if (lm) lm.status = m.status; } } }
   ids = verified;
   if (!ids.length) { UI.refreshAll(); if (spared) toast(`Nothing was deleted — ${spared} photo${spared === 1 ? ' is' : 's are'} no longer in the bin (restored in another tab?).`, 4500); return; }
   const byF = new Map(); const local = [];
   for (const id of ids) { const m = L.meta.get(id); if (m?.folder && L.folders.has(m.folder)) { if (!byF.has(m.folder)) byF.set(m.folder, []); byF.get(m.folder).push(m); } else local.push(id); }
-  let ok = 0, fail = 0; const removed = [...local];
+  let ok = 0, fail = 0; const removed = [];
   for (const [fid, ms] of byF) { const f = L.folders.get(fid);
     if (!(await Folders.perm(f, 'readwrite', true))) { fail += ms.length; continue; }
-    for (const m of ms) { try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
+    for (const m of ms) { // the permission prompt can sit open indefinitely — the longest await in this function — so each photo is re-validated at the point of no return, AFTER the prompt, not in the snapshot taken before it (R4-D3)
+      let sm = null; try { sm = await DB.get('meta', m.id); } catch {}
+      if (!sm || sm.status !== 'trash') { spared++; if (sm) m.status = sm.status; continue; }
+      try { let d = f.handle; for (const p of m.path) d = await d.getDirectoryHandle(p); await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
+  let localGone = 0; // picked photos are only removed from Iris — under the same promise, re-checked just before their records go
+  for (const id of local) { let sm = null; try { sm = await DB.get('meta', id); } catch {} if (sm && sm.status !== 'trash') { spared++; const lm = L.meta.get(id); if (lm) lm.status = sm.status; } else { removed.push(id); localGone++; } }
   await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Junk.epoch++; Dups.groups = null;
-  UI.refreshAll(); toast((spared ? `${spared} photo${spared === 1 ? ' was' : 's were'} spared — no longer in the bin. ` : '') + (fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : `Deleted ${ok} photo${ok === 1 ? '' : 's'} from your phone.` + (local.length ? ` Removed ${local.length} from Iris.` : '')), 4500);
+  UI.refreshAll(); toast((spared ? `${spared} photo${spared === 1 ? ' was' : 's were'} spared — no longer in the bin. ` : '') + (fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : ok ? `Deleted ${ok} photo${ok === 1 ? '' : 's'} from your phone.` + (localGone ? ` Removed ${localGone} from Iris.` : '') : localGone ? `Removed ${localGone} from Iris.` : 'Nothing was deleted.'), 4500);
 }
 
 /* ---------------- Viewer ---------------- */
