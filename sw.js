@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v109';
+const VERSION = 'iris-v110';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
@@ -18,14 +18,20 @@ self.addEventListener('install', (e) => {
       // only the clients alive in this breath, and an install that completes with
       // zero window clients used to record the failure nowhere — the version then
       // ran its whole life with the failure unspoken. The note waits in
-      // 'iris-sw-notes' until a page reads it at boot, speaks the same word, and
-      // deletes it; a page that hears the live message deletes it too, so the word
-      // is spoken exactly once, by whichever road reaches a page first. The note is
-      // written before the message is posted, so a listening page can always clear
-      // it. Its failure is swallowed like the report's own: a notification must
-      // never break the install it rides on.
-      try { const nc = await caches.open('iris-sw-notes'); await nc.put('shell-missing/' + VERSION, new Response(JSON.stringify({ version: VERSION, failed }), { headers: { 'content-type': 'application/json' } })); } catch {}
-      const cs = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' }); for (const cl of cs) cl.postMessage({ type: 'sw-shell-missing', version: VERSION, failed });
+      // 'iris-sw-notes' until a page claims it, and the note is the word's ticket
+      // (R12-P1): a page speaks only when its own delete is the one that removes
+      // the note — the boot audit claims it that way, and so does a page that
+      // hears the live message — so the word is spoken exactly once however the
+      // two roads overlap, never once per road. The message reports whether the
+      // note landed ('noted'), so a handler that finds no note can tell a ticket
+      // another road already claimed (stay silent — the claimer speaks) from a
+      // ticket that never stood (speak from the message itself, the only road).
+      // The note is written before the message is posted, so at post time the
+      // ticket already stands. Its failure is swallowed like the report's own:
+      // a notification must never break the install it rides on.
+      let noted = false;
+      try { const nc = await caches.open('iris-sw-notes'); await nc.put('shell-missing/' + VERSION, new Response(JSON.stringify({ version: VERSION, failed }), { headers: { 'content-type': 'application/json' } })); noted = true; } catch {}
+      const cs = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' }); for (const cl of cs) cl.postMessage({ type: 'sw-shell-missing', version: VERSION, failed, noted });
     }
     await self.skipWaiting();
   })());

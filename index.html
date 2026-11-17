@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.94';
+const VER = 'Iris 2.95';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -3690,15 +3690,22 @@ function bootRecovery(e) {
 // install in the 'iris-sw-notes' cache (a name the worker's activate sweep never
 // touches, so a note survives until a page reads it — a later version's page
 // included, and the word it speaks is that install's own). This audit runs at boot:
-// it speaks the same word the live message speaks, for every note waiting, and
-// deletes each note as it is read. The live message handler deletes its note too,
-// so the word is spoken exactly once — by whichever road reaches a page first.
+// for every note waiting it speaks the same word the live message speaks — but
+// only on a won claim (R12-P1). The note is the word's ticket: the audit reads
+// the note, then deletes it, and speaks only when its delete is the one that
+// removed the note; a delete that finds the note already gone means the live
+// handler, or another tab's audit, claimed the word first, and this road stays
+// silent. The handler claims under the same discipline, so however the two
+// roads overlap — two tabs booting in the same breath, a message landing
+// mid-audit — the word is spoken exactly once. A note whose claim is won but
+// whose body is corrupt or empty is consumed silently by its claimer, as before.
 async function swNoteAudit() {
   try {
     const nc = await caches.open('iris-sw-notes');
     for (const req of await nc.keys()) {
-      const r = await nc.match(req); await nc.delete(req);
-      if (!r) continue;
+      const r = await nc.match(req);
+      if (!r) continue; // already claimed by another road — the word is theirs
+      if (!(await nc.delete(req))) continue; // the claim was lost between the read and the delete — stay silent
       const n = await r.json().catch(() => null);
       if (n && Array.isArray(n.failed) && n.failed.length) Log.add('warn', 'the ' + (n.version || 'new') + ' update installed without: ' + n.failed.join(', ') + ' — everything else updated normally');
     }
@@ -3726,7 +3733,7 @@ async function swNoteAudit() {
       // in R4-P5; the update reload was the door that cure left behind.
       swReloaded = true; Work.stop(); location.reload();
     });
-    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') { Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); if (d.version) caches.open('iris-sw-notes').then((nc) => nc.delete('shell-missing/' + d.version)).catch(() => {}); } else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
+    navigator.serviceWorker.addEventListener('message', (e) => { const d = e.data || {}; if (d.type === 'sw-shell-missing') { const say = () => Log.add('warn', 'the ' + (d.version || 'new') + ' update installed without: ' + (d.failed || []).join(', ') + ' — everything else updated normally'); if (!d.version) say(); else caches.open('iris-sw-notes').then(async (nc) => { const key = 'shell-missing/' + d.version; if (await nc.match(key)) { if (await nc.delete(key)) say(); } else if (!d.noted) say(); }).catch(() => say()); } else if (d.type === 'sw-put-failed') Log.add('warn', 'a background cache update did not land and will be retried on a later load', d.url || ''); });
     // Speak any shell-missing word an earlier clientless install left behind (R11-PS2).
     swNoteAudit();
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
