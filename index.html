@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.74';
+const VER = 'Iris 2.75';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -555,6 +555,12 @@ const DB = {
   // single transaction the get and the put are serialised by IndexedDB itself — tabs'
   // merges queue, they never overwrite each other.
   mergeSet(store, key, item, cap = 25000) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); const o = t.objectStore(store); const q = o.get(key); q.onsuccess = () => { const a = Array.isArray(q.result) ? q.result.filter((x) => typeof x === 'string') : []; if (!a.includes(item)) { a.push(item); o.put(a.slice(-cap), key); } }; t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  // The merge's mirror (R6-D5): an item comes back OUT of a stored set inside one
+  // readwrite transaction, for the one retraction the adoption fence owes — a
+  // consumption noted into a fresh index's trace for a record that no longer lives
+  // there is a false durable claim, and it is withdrawn with the same serialisation
+  // discipline the note itself was written under.
+  unmergeSet(store, key, item) { return new Promise((res, rej) => { const t = this.tx([store], 'readwrite'); const o = t.objectStore(store); const q = o.get(key); q.onsuccess = () => { const a = Array.isArray(q.result) ? q.result.filter((x) => typeof x === 'string') : []; const i = a.indexOf(item); if (i >= 0) { a.splice(i, 1); o.put(a, key); } }; t.oncomplete = res; t.onerror = () => rej(t.error); }); },
 };
 
 /* Orphan sweep (R2-D7): boot loads only complete meta+vec pairs into L, so a durable
@@ -714,6 +720,7 @@ const Backup = {
       if (buf.byteLength < 12 || new TextDecoder().decode(u.subarray(0, 8)) !== 'IRISBAK1') return toast('That is not an Iris backup file.', 5000);
       const hlen = new DataView(buf).getUint32(8, true); const head = JSON.parse(new TextDecoder().decode(u.subarray(12, 12 + hlen)));
       if (head.kind !== 'index-backup') return toast('That is not an Iris backup file.', 5000);
+      if (typeof head.v === 'number' && head.v > 1) return toast('That backup was made by a newer version of Iris and cannot be restored here. Update Iris first, then restore it.', 6000); // a format this Iris does not know is refused honestly, never parsed hopefully (R6-DS1). Backups without the field predate it and are version 1 by construction.
       if (head.dim !== DIM) return toast('This backup came from a different AI model and cannot be restored here.', 6000);
       const base = 12 + hlen; let n = 0, failed = 0, firstErr = '', kept = 0, gone = 0, bad = 0, dup = 0; const badNames = [];
       // Erase's fence reaches this writer too (R4-D2): eraseIndex bumps Indexer.epoch, and
@@ -731,9 +738,23 @@ const Backup = {
       // (R3-D2): their entries must not be written back as phantom duplicates. It is re-read
       // from the store, never served from this session's cache: another tab may have adopted
       // since this tab first looked, and the durable record is the only truth both tabs
-      // share (R4-D5). Since R5-D2 the loop below re-reads it for every entry it judges —
-      // a restore is a long loop, and a snapshot taken here would age across all of it.
-      await this.adoptedIds(true);
+      // share (R4-D5). It is read ONCE here (R6-D11): R5-D2 re-read it for every entry the
+      // loop judged, and since IndexedDB structured-clones the whole array per read, the
+      // price was entries × trace size — quadratic on the most common restore there is.
+      // One read stays exact without the second read R5-D2 was buying: an adoption can
+      // only consume a candidate the STORE holds, so any candidate an adoption lands on
+      // mid-restore either stood in the store when this restore began — and the loop
+      // decides those entries by asking the store about that id when it reaches them
+      // (storeKeys0, below), seeing the consumption at that moment — or was birthed by
+      // this very restore earlier in its own loop, whose ids seenIds already guards.
+      let trace0 = await this.adoptedIds(true);
+      // The trace's freshness counter (R6-D11): noteConsumed bumps a tiny number in kv
+      // beside the trace on every note. The loop below re-reads the full trace only
+      // when that number has moved since this read — so a mid-restore adoption is
+      // still seen when the loop reaches its candidate (R5-D2's visibility, kept
+      // whole), while a restore nobody adopts into pays one small read per entry
+      // instead of one full-trace clone per entry.
+      let traceN0 = 0; try { const n0 = await DB.get('kv', 'adoptedFromN'); traceN0 = typeof n0 === 'number' ? n0 : 0; } catch {}
       // The trace's cap stops being load-bearing (R4-D6): a photo adopted on this device
       // lives in L under this device's id with the same name, size and vector, so an entry
       // matching a live record on all three is that photo's duplicate whether or not the
@@ -747,6 +768,30 @@ const Backup = {
       for (const m of L.meta.values()) { if (!m.name || typeof m.size !== 'number' || !L.rows.has(m.id)) continue; const v = L.vec(m.id); const k = m.name + '|' + m.size + '|' + vhash(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)); if (!liveKeys.has(k)) liveKeys.set(k, m.id); }
       const sameVec = (id, bytes) => { const lv = L.vec(id); const lb = new Uint8Array(lv.buffer, lv.byteOffset, lv.byteLength); if (lb.length !== bytes.length) return false; for (let i = 0; i < bytes.length; i++) if (lb[i] !== bytes[i]) return false; return true; };
       const seenIds = new Set();
+      // The store's own meta key set, taken once alongside the trace (R6-D11): an entry
+      // whose id stood in the store when this restore began but stands in neither this
+      // tab's library nor the trace is decided by asking the store about that id when
+      // the loop reaches it — so a mid-restore adoption or deletion is still seen at
+      // that moment (R5-D2's visibility), at one key lookup per entry instead of one
+      // full-trace clone per entry.
+      let storeKeys0 = new Set();
+      try { storeKeys0 = new Set(await new Promise((res, rej) => { const q = DB.tx(['meta']).objectStore('meta').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); })); } catch {}
+      // The kept treatment, shared by every branch that finds the entry's record already
+      // in the store (R6-D1): the STORE's current record is what is kept — its bin status
+      // above all (R2-D4) — never the backup's older copy and never this tab's stale
+      // memory. And the pair is re-validated in the writing breath itself (R6-D3): an
+      // adoption or a device deletion landing between the first read and these writes
+      // removes one or both halves, and a pair that no longer stands whole is taken
+      // back out and counted gone — never resurrected into a second adoption.
+      const keepFromStore = async (stored, vec) => {
+        await DB.put('vecs', stored.id, vec); wrote.push(stored.id);
+        if (await erased()) return 'aborted';
+        const keep = { ...stored, fromBak: true };
+        if (!stored.fromBak) await DB.put('meta', stored.id, keep);
+        const mNow = await DB.get('meta', stored.id); const vNow = mNow ? await DB.get('vecs', stored.id) : null;
+        if (!mNow || !vNow) { try { await DB.del('meta', stored.id); } catch {} try { await DB.del('vecs', stored.id); } catch {} return 'gone'; }
+        L.add(keep, new Float32Array(vec)); return 'kept';
+      };
       for (const e of head.entries) { try {
         if (await erased()) { aborted = true; break; }
         // Every entry is validated BEFORE anything is written (R3-D1): its vector must be
@@ -762,17 +807,24 @@ const Backup = {
         if (seenIds.has(e.m.id)) { dup++; continue; } // the same photo twice in one file is one record, counted once (R4-D8)
         seenIds.add(e.m.id);
         const vec = buf.slice(base + e.o, base + e.o + e.n); const local = L.meta.get(e.m.id);
-        if (local) { // already here — but "here" is decided by the STORE, not by this tab's memory (R5-D1): another tab may have deleted this very record since this tab booted, by adopting it (the swap removes its halves) or by deleting it from the device. The kept path used to write the record back wholesale on memory's say-so — resurrecting a consumed candidate for a second adoption, and a device-deleted photo stamped adoptable. So the store is asked, and only a record the store still holds is kept; the kept copy is the STORE's record (its bin status above all), never this tab's possibly stale one (R2-D4).
+        if (local) { // already here — but "here" is decided by the STORE, not by this tab's memory (R5-D1): another tab may have deleted this very record since this tab booted, by adopting it (the swap removes its halves) or by deleting it from the device. The kept path used to write the record back wholesale on memory's say-so — resurrecting a consumed candidate for a second adoption, and a device-deleted photo stamped adoptable. So the store is asked, and only a record the store still holds is kept; the kept copy is the STORE's record (its bin status above all), never this tab's possibly stale one (R2-D4). The keeping itself re-validates at the write (R6-D3, inside keepFromStore).
           const stored = await DB.get('meta', e.m.id);
           if (!stored) { gone++; Log.add('info', 'restore did not write back a record another tab has removed', e.m.name); continue; } // the store says this record is gone; it is not this restore's to resurrect
-          await DB.put('vecs', e.m.id, vec); wrote.push(e.m.id);
-          if (await erased()) { aborted = true; break; }
-          const keep = { ...stored, fromBak: true };
-          if (!stored.fromBak) await DB.put('meta', e.m.id, keep);
-          L.add(keep, new Float32Array(vec)); n++; kept++; continue; }
-        if ((await this.adoptedIds(true)).has(e.m.id)) { gone++; continue; } // already matched into this device by an earlier adoption — writing it back would duplicate the adopted photo under the old device's folder (R3-D2). The trace is re-read for EVERY entry, not snapshotted at the restore's start (R5-D2): a restore runs for seconds or minutes, and an adoption landing in another tab during it must be seen when the loop reaches its candidate, not missed from a frozen copy.
+          const kr = await keepFromStore(stored, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { gone++; Log.add('info', 'restore did not write back a record another tab removed while it was being kept', e.m.name); continue; } n++; kept++; continue; }
+        if (trace0.has(e.m.id)) { gone++; continue; } // already matched into this device by an earlier adoption — writing it back would duplicate the adopted photo under the old device's folder (R3-D2). The trace is the copy read once at this restore's start (R6-D11): a candidate consumed mid-restore is caught two ways below — the freshness counter re-reads the trace when any note has landed since, and the store-key branch asks the store about the id itself when the loop reaches it.
+        try { const nNow = await DB.get('kv', 'adoptedFromN'); const nN = typeof nNow === 'number' ? nNow : 0; if (nN !== traceN0) { traceN0 = nN; trace0 = await this.adoptedIds(true); if (trace0.has(e.m.id)) { gone++; continue; } } } catch {} // the freshness check (R6-D11): a note landed mid-restore — re-read the trace once, judge this entry against the new copy, and carry the fresh copy forward
         const liveId = liveKeys.get(e.m.name + '|' + e.m.size + '|' + vhash(new Uint8Array(vec)));
         if (liveId && sameVec(liveId, new Uint8Array(vec))) { gone++; continue; } // its name, size and vector — byte for byte — already live here under this device's own id: the trace-cap backstop (R4-D6, exact since R5-D5)
+        if (storeKeys0.has(e.m.id)) { // the store held this id when the restore began, though this tab's library never did: decide from the store, live — an adoption or deletion that landed mid-restore has already removed it there, and the entry counts gone, exactly as the per-entry trace re-read used to conclude (R5-D2's visibility, kept).
+          const stored = await DB.get('meta', e.m.id);
+          if (!stored) { gone++; continue; }
+          const kr = await keepFromStore(stored, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { gone++; continue; } n++; kept++; continue; }
+        // The birth path asks the store too (R6-D1): a record another tab birthed after
+        // this tab booted lives in the store but not in this tab's library, and writing
+        // the backup's meta over it blind rewound that tab's decisions about it — a bin
+        // move above all. If the store holds the id, the entry is kept, not born.
+        const storedB = await DB.get('meta', e.m.id);
+        if (storedB) { const kr = await keepFromStore(storedB, vec); if (kr === 'aborted') { aborted = true; break; } if (kr === 'gone') { gone++; continue; } n++; kept++; continue; }
         const m = { ...e.m, fromBak: true }; // brought in by this restore — and only records a restore brought in may be adopted later (R2-D9)
         // Born in L BEFORE its first durable write (R3-D7): the orphan sweep's fence is L
         // membership, so a record being restored can never be collected mid-birth; if a
@@ -793,7 +845,7 @@ const Backup = {
       // entry is skipped and counted — it must never throw into the outer catch and report
       // a landed restore as a total failure, nor cost the photos their adoption window.
       const wroteC = [];
-      if (Array.isArray(head.colls)) for (const pair of head.colls) { if (await erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; if (L.colls.has(id)) { skippedC++; continue; } try { await DB.put('colls', id, c); wroteC.push(id); L.colls.set(id, c); nc++; } catch { failedC++; } }
+      if (Array.isArray(head.colls)) for (const pair of head.colls) { if (await erased()) { aborted = true; break; } const id = Array.isArray(pair) ? pair[0] : null, c = Array.isArray(pair) ? pair[1] : null; const shape = c && typeof c === 'object' ? this.collShapeOk(c) : null; if (typeof id !== 'string' || !shape) { badC++; continue; } c.type = shape; const sc = await DB.get('colls', id); if (sc) { skippedC++; if (!L.colls.has(id)) L.colls.set(id, sc); continue; } try { await DB.put('colls', id, c); wroteC.push(id); L.colls.set(id, c); nc++; } catch { failedC++; } } // "already here" is decided by the STORE, not by this tab's collection set (R6-D2): a collection another tab deleted was counted "already here and kept" on memory's say-so and never written back — absent at the next boot under a success word. The store is asked; a collection it holds is kept (and learned, if this tab lacked it), and one it lacks is written back and counted restored.
       else if (head.colls != null) badC++;
       if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2)
         try { if (wrote.length && DB.removeItems) await DB.removeItems(wrote); for (const id of wroteC) { try { await DB.del('colls', id); } catch {} L.colls.delete(id); } } catch {}
@@ -806,7 +858,7 @@ const Backup = {
       // memory would silently un-dismiss that tab's groups — the same lost update
       // Dups.dismiss now guards against at its own write.
       let mergedD = 0;
-      if (Array.isArray(head.dismissed)) { try { for (const k of head.dismissed) if (typeof k === 'string' && !Dups.dismissed.has(k)) { Dups.dismissed.add(k); mergedD++; } try { const cur = JSON.parse(localStorage.getItem('iris-dismissed') || '[]'); if (Array.isArray(cur)) for (const k of cur) if (typeof k === 'string') Dups.dismissed.add(k); } catch {} if (mergedD) { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-10000))); } catch {} } Log.add('info', 'dismissed groups restored from backup', mergedD); } } catch {} }
+      if (Array.isArray(head.dismissed)) { try { for (const k of head.dismissed) if (typeof k === 'string' && !Dups.dismissed.has(k)) { Dups.dismissed.add(k); mergedD++; } try { const cur = JSON.parse(localStorage.getItem('iris-dismissed') || '[]'); if (Array.isArray(cur)) for (const k of cur) if (typeof k === 'string') Dups.dismissed.add(k); } catch {} if (mergedD) { if (typeof Dups.persist === 'function') Dups.persist(); else { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed])); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...Dups.dismissed].slice(-10000))); } catch {} } } } Log.add('info', 'dismissed groups restored from backup', mergedD); } } catch {} } // the merge persists through Dups.persist itself (R6-D9): the full set is attempted first and the capped slices are only the fallback after a failed full write — restore's private copy of this chain attempted the slice FIRST, silently shedding the oldest dismissals whenever the set stood over the cap, though the full write would have fit. The union read above (the currently stored set merged into memory before the write, R5-D9) stays in this copy as well: persist() performs it again on the production path, and in any world where persist is not at hand the union is still honoured here rather than silently dropped.
       if (!n && !nc && (failed || bad)) { Log.add('ERR', 'restore failed', firstErr || 'damaged entries'); return toast('Could not restore that backup: ' + (firstErr || 'part of the backup was damaged'), 6000); }
       if (n || nc) { this.on = true; this.pool = null; try { await DB.put('kv', 'adoptPool', true); } catch {} }
       if (gone) Log.add('info', 'restore skipped photos already matched into this device', gone);
@@ -851,7 +903,7 @@ const Backup = {
   // lands as a merge INSIDE one readwrite transaction (DB.mergeSet), where IndexedDB
   // serialises the tabs itself and no interleaving can lose either id. The read-modify-
   // write below remains only for a store that predates the merge primitive.
-  async noteConsumed(id) { try { if (typeof DB.mergeSet === 'function') { await DB.mergeSet('kv', 'adoptedFrom', id); if (this._adopted) this._adopted.add(id); return; } const s = await this.adoptedIds(true); if (s.has(id)) return; s.add(id); await DB.put('kv', 'adoptedFrom', [...s].slice(-25000)); } catch {} },
+  async noteConsumed(id) { try { if (typeof DB.mergeSet === 'function') { await DB.mergeSet('kv', 'adoptedFrom', id); if (this._adopted) this._adopted.add(id); } else { const s = await this.adoptedIds(true); if (s.has(id)) return; s.add(id); await DB.put('kv', 'adoptedFrom', [...s].slice(-25000)); } try { const n = await DB.get('kv', 'adoptedFromN'); await DB.put('kv', 'adoptedFromN', (typeof n === 'number' ? n : 0) + 1); } catch {} } catch {} }, // the note also bumps the trace's freshness counter (R6-D11): a restore in flight elsewhere watches the number — cheap — and re-reads the full trace only when it has moved, instead of cloning the whole trace per entry
   // A collection is restored only in a shape its consumers can survive (R4-D4): the
   // envelope check alone let a 'set' with no ids array (collMembers filters it) and a
   // 'smart' with no numeric z (openColl prints it with toFixed) be installed durably,
@@ -877,7 +929,8 @@ const Backup = {
       // erased the index since this tab learned it, this tab's library is a memory of a
       // world that no longer exists, and a swap written from it would land inside the
       // fresh index the erase created. The swap refuses, like every other writer.
-      if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { Log.add('warn', 'adoption stopped: the index was erased in another tab', spec.name); return false; }
+      const genGone = async () => typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved();
+      if (await genGone()) { Log.add('warn', 'adoption stopped: the index was erased in another tab', spec.name); return false; }
       const file = spec.file ?? (spec.getFile ? await spec.getFile() : null); if (!file) return false;
       const pk = `p:${(spec.path || []).join('/')}/${spec.name}:${file.size}`, nk = `n:${spec.name}:${file.size}`;
       // Strongest evidence first: a record whose mtime matches the file's exactly wins. On
@@ -895,6 +948,12 @@ const Backup = {
       // longer exists, collectable by no fence. The candidate is NOT consumed: it stays
       // in the pool for whatever folder state comes next.
       if (spec.folder && typeof Indexer !== 'undefined' && Indexer.removed?.has(spec.folder)) { Log.add('info', 'adoption stopped: its folder was removed while the photo was being read', spec.name); return false; }
+      // The generation is re-asked at the swap itself, not only at the door (R6-D5):
+      // everything above this line is reads across awaits — the file read can take
+      // seconds for a large photo — and an erase landing inside them is invisible to
+      // the door's one check. The indexer loop re-checks adjacent to every save;
+      // adoption meets the same standard at its one write.
+      if (await genGone()) { Log.add('warn', 'adoption stopped at the swap: the index was erased in another tab', spec.name); if (typeof indexGone === 'function') indexGone(); return false; }
       // Born live, and born its own record: the adopted photo never inherits the candidate's
       // bin status (a decision made about a different record) nor its backup stamp (R2-D9).
       const m = { ...cand, id: spec.id, name: spec.name, path: spec.path || [], folder: spec.folder ?? null, src: spec.src, size: file.size, mtime: file.lastModified || cand.mtime, status: null };
@@ -903,6 +962,14 @@ const Backup = {
       // can never leave the same vector durably stored under two ids — and a swap that did
       // land is never reported as a failure (R2-D6).
       await DB.swapItem(m, buf, cand.id);
+      // And verified in the breath AFTER the swap (R6-D5): the store serialises a
+      // clear and this swap, so an erase that landed first is invisible to every
+      // check before the write — the swap then stands in the fresh index, a complete
+      // record under a folder the erase deleted. If the generation has moved, the
+      // swap is taken back out and the adoption reports failure: no zombie record,
+      // and the candidate is neither consumed nor noted for a record that does not
+      // live.
+      if (await genGone()) { try { await DB.removeItems([m.id]); } catch {} Log.add('warn', 'adoption undone: the index was erased in another tab while it landed', spec.name); if (typeof indexGone === 'function') indexGone(); return false; }
       // The candidate is spent only now that the swap has landed (R3-D6): a failed swap
       // used to consume it anyway — evicting it for the session and, at left zero,
       // durably disarming the whole window over one transient storage error.
@@ -913,6 +980,12 @@ const Backup = {
       // sweep eat a just-adopted record as an "orphan" while adopt reported success.
       L.meta.delete(cand.id); L.add(m, new Float32Array(buf)); L.rebuild();
       await this.noteConsumed(cand.id); // the durable trace a future re-restore consults (R3-D2)
+      // One last look before the collection rewrites ride on this adoption (R6-D5):
+      // an erase landing while the consumption was being noted has already taken the
+      // adopted record with its clear — what remains is to withdraw the note, so the
+      // fresh index's trace never claims a candidate was consumed into a record that
+      // does not live there, and to write nothing more from this tab.
+      if (await genGone()) { try { if (typeof DB.unmergeSet === 'function') await DB.unmergeSet('kv', 'adoptedFrom', cand.id); else { const s = await this.adoptedIds(true); if (s.delete(cand.id)) await DB.put('kv', 'adoptedFrom', [...s].slice(-25000)); } if (this._adopted) this._adopted.delete(cand.id); try { const n = await DB.get('kv', 'adoptedFromN'); await DB.put('kv', 'adoptedFromN', (typeof n === 'number' ? n : 0) + 1); } catch {} } catch {} try { await DB.removeItems([m.id]); } catch {} Log.add('warn', 'adoption undone at its last step: the index was erased in another tab', spec.name); if (typeof indexGone === 'function') indexGone(); return false; }
       for (const c of L.colls.values()) { const i = (c.ids || []).indexOf(cand.id); if (i >= 0) { c.ids[i] = m.id; DB.put('colls', c.id, c); } }
       // An identity died and another was born at the same count: the count-keyed Junk and
       // Sugg caches must hear about the swap, the same discipline as setStatus (R2-D3).
@@ -926,9 +999,11 @@ const Backup = {
   },
 };
 const ThumbFix = {
-  q: [], busy: false, missing: null,
-  add(id, getFile) { if (getFile) { this.q.push({ id, getFile }); this.run(); } },
-  async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile()); if (p?.thumb) { await DB.put('thumbs', id, p.thumb); any = true; } } catch {} } this.busy = false; if (any) UI.refreshLight(); },
+  q: [], busy: false, missing: null, halted: false, // halted: this tab has been told its index is gone (indexGone / eraseIndex set it) — the fixer stops like the Indexer and the Work service do (R6-D6)
+  add(id, getFile) { if (getFile && !this.halted) { this.q.push({ id, getFile }); this.run(); } },
+  async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile()); if (this.halted) break; // told while this decode was parked: the thumbnail is never written into a store this tab no longer owns (R6-D6)
+        if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { this.halted = true; this.q.length = 0; Log.add('warn', 'thumbnail fixing stopped: the index was erased in another tab'); break; } // the generation fence at this write too — a tab that was never told still never writes into a cleared store
+        if (p?.thumb) { const still = await DB.get('meta', id); if (!still) continue; await DB.put('thumbs', id, p.thumb); any = true; } } catch {} } this.busy = false; if (any) UI.refreshLight(); },
   async buildMissing() { if (this.missing) return; try { const keys = await new Promise((res, rej) => { const q = DB.tx(['thumbs']).objectStore('thumbs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); const have = new Set(keys); this.missing = new Set(L.ids.filter((id) => !have.has(id))); } catch { this.missing = new Set(); } },
 };
 
@@ -1419,6 +1494,15 @@ function updSel() { for (const id of Sel.set) if (!L.meta.has(id)) Sel.set.delet
 
 /* ---------------- Status (bin) ---------------- */
 async function setStatus(ids, status) { const ms = []; for (const id of ids) { const m = L.meta.get(id); if (m) ms.push(m); } if (!ms.length) { UI.binCount(); return true; }
+  // The status writer stands under the durable-generation fence like every other
+  // writer (R6-D10): it used to be the one writer nobody enrolled, and because an
+  // erase's clear fires no versionchange, a stale tab was never even told — its bin
+  // moves landed as zombie half-records (a meta, no vector) in the fresh index,
+  // wearing the erased world's bin decisions. The check sits at the write itself:
+  // the writer keeps the generation it first wrote under on the function (setStatus
+  // is called from surfaces where no other fence stands in front of it), and a moved
+  // generation refuses the write, says so, and tells the tab its world is gone.
+  try { const g = await DB.get('kv', 'indexGen'); const curG = g == null ? null : g; if (setStatus._gen === undefined) setStatus._gen = curG; else if (curG !== setStatus._gen) { Log.add('warn', 'status change not saved: the index was erased in another tab'); toast('That change was not saved — the index was erased in another tab, and this copy of Iris is out of date. Reload to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return false; } } catch {}
   // Persist FIRST, believe second: the in-memory status flips only after the durable write
   // lands, so a failed write (quota) never leaves the UI believing a move that didn't save.
   try { await DB.putMetas(ms.map((m) => ({ ...m, status }))); } catch (e) { Log.add('ERR', 'status change not saved', e.message); toast(`That change didn't save (${e.message}). Nothing was moved.`, 6000); return false; }
@@ -1527,6 +1611,10 @@ const Folders = {
     for (const p of this.pending || []) { try { if (p.name === handle.name && await p.handle.isSameEntry(handle)) return this.basket(); } catch {} }
     const f = { id: 'f' + Date.now().toString(36), name: handle.name, handle, added: Date.now(), lastScan: 0 };
     Indexer.removed.delete(f.id);
+    // The folder-record write stands under the durable-generation fence too (R6-D10):
+    // a stale tab that survived another tab's erase must not plant a folder record
+    // into the fresh index the erase created.
+    if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That folder was not added — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
     await DB.put('folders', f.id, f); L.folders.set(f.id, f); UI.renderLib(); this.pending = [...(this.pending || []), f];
     this.basket();
   },
@@ -1573,7 +1661,7 @@ const Folders = {
 const Indexer = {
   queue: [], queued: new Set(), removed: new Set(), running: false, paused: false, done: 0, total: 0, skipped: 0, t0: 0, cur: '', wake: null,
   epoch: 0, inflight: false, // Erase's fence (R2-DS1): eraseIndex bumps the epoch and waits out inflight before clearing
-  gen: undefined, // the durable index generation this tab has learned (R5-D3): eraseIndex stamps a fresh token into kv after its clear, so an erase in ANOTHER tab — invisible to this page's epoch, tombstones and pause — still moves a value every writer can check. undefined = not learned yet; null = no erase has ever stamped one.
+  gen: undefined, // the durable index generation this tab has learned (R5-D3): eraseIndex stamps a fresh token into kv after its clear, so an erase in ANOTHER tab — invisible to this page's epoch, tombstones and pause — still moves a value every writer can check. undefined = not learned yet; null = no token could be learned or stamped at boot (the store refused) — boot otherwise ensures a token exists, so a cleared store never again reads as the virgin one a null-learned tab began under (R6-P2).
   scanning: '', found: 0,
   speed: localStorage.getItem('iris.speed') || 'gentle', // gentle: AI uses ~25% of the GPU, balanced ~50%, fast 100%
   REST: { gentle: 3, balanced: 1, fast: 0 },
@@ -1619,6 +1707,17 @@ const Indexer = {
       const st = Folders.stats; Log.add('info', `scan end ${f.name}: ${this.found} photos, ${fresh} new, ${Math.round(performance.now() - tS)} ms, dir errors ${st.dirErrors}${st.hidden ? `, ${st.hidden} hidden skipped` : ''}${st.trees ? `, ${st.trees} in cache/trash folders skipped` : ''}, other files`, st.skippedTypes);
       if (st.dirErrors) ok = false; // don’t forget photos from folders we couldn’t read
       if (ok && !this.removed.has(f.id)) { // forget photos that were deleted outside Iris (and never resurrect a removed folder)
+        // The sweep is fenced like the scan's door (R6-D4): the generation is re-asked
+        // HERE, at the moment of writing — not only when the scan began. The walk above
+        // runs for seconds or minutes; an erase in another tab landing inside it moves
+        // the durable generation, and this tab is told nothing (scan's own end calls
+        // start(), which takes its empty-queue exit before its generation check). An
+        // unfenced sweep then computed "gone" from pre-erase memory and deleted the
+        // fresh world's backup-restored records — the very ids the sweep names are the
+        // ids a restore just wrote — and its folder-record write resurrected a folder
+        // the erase had deleted. A moved generation ends the scan here instead: no
+        // sweep, no folder write, no disarm (that writes too), no success word.
+        if (await this.genMoved()) { Log.add('warn', 'scan stopped at its final step: the index was erased in another tab', f.name); this.scanning = ''; this.curF = null; if (typeof indexGone === 'function') indexGone(); return; }
         const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
         if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); Dups.groups = null; } // records died here: cached duplicate groups must not outlive them, whatever the AI does later (D-2)
         f.lastScan = Date.now(); f.count = this.found; await DB.put('folders', f.id, f);
@@ -1842,6 +1941,16 @@ const Dups = {
   // is not an array of group keys) resets the hidden-groups list to empty and says so
   // in the log, and the app boots.
   dismissed: new Set((() => { try { const a = JSON.parse(localStorage.getItem('iris-dismissed') || '[]'); if (Array.isArray(a)) return a.filter((x) => typeof x === 'string'); } catch {} try { Log.add('warn', 'the hidden duplicate groups list was unreadable and has been reset'); } catch {} return []; })()),
+  // The dismissed set's sync baseline (R6-D8): what this tab last knew the STORED set
+  // to be, and whether a stored set has ever stood for this tab. Erase removes the
+  // stored list outright (eraseIndex's removeItem), and the Library reset does the
+  // same — a tab that survives either one must not write its pre-removal memory back
+  // over the removal at its next dismissal. persist() compares against this baseline:
+  // a stored set that has VANISHED since the baseline means the removal was
+  // deliberate, and the union restarts from the store's present — only keys dismissed
+  // since the baseline (the dismissal that triggered the persist, a restore's merge)
+  // are carried forward.
+  _sync: (() => { try { const raw = localStorage.getItem('iris-dismissed'); if (raw != null) { const a = JSON.parse(raw); if (Array.isArray(a)) return { base: new Set(a.filter((x) => typeof x === 'string')), stored: true }; } } catch {} return { base: new Set(), stored: false }; })(),
   quality(m, maxSharp) { const s = Math.min(1, Math.log1p(m.sharp) / Math.log1p(maxSharp || 1)); const ex = 1 - Math.abs(m.bright - 125) / 125; const res = Math.min(1, (m.w * m.h) / 12e6); return s * .6 + ex * .25 + res * .15; },
   async find() {
     // The world guard Junk's compute got in R3-I5, for the other long compute (R4-I2):
@@ -1887,7 +1996,18 @@ const Dups = {
   // erase the first tab's dismissal wholesale, silently un-hiding a group at the
   // next launch. The trace learned this re-read in R4-D5; the dismissed set now has
   // the same discipline: union with what is stored, then write.
-  persist() { try { const cur = JSON.parse(localStorage.getItem('iris-dismissed') || '[]'); if (Array.isArray(cur)) for (const k of cur) if (typeof k === 'string') this.dismissed.add(k); } catch {} try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed])); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-10000))); } catch {} } } },
+  persist() { let cur = null; try { const raw = localStorage.getItem('iris-dismissed'); if (raw != null) { const a = JSON.parse(raw); if (Array.isArray(a)) cur = a; } } catch {}
+    // A stored set that has vanished since this tab's baseline was an ERASE (or the
+    // Library reset), not an empty world to union over (R6-D8): the pre-removal keys
+    // in memory are dropped from the baseline before the union, so the erased list
+    // stays erased. Keys dismissed since the baseline are not in it and survive —
+    // the dismissal that triggered this persist, and a restore's merged keys, are
+    // the new world's own, not the erased one's.
+    if (cur == null && this._sync && this._sync.stored) { for (const k of this._sync.base) this.dismissed.delete(k); Log.add('info', 'the hidden-groups list was erased elsewhere; this tab starts its list from the new world'); }
+    try { if (Array.isArray(cur)) for (const k of cur) if (typeof k === 'string') this.dismissed.add(k); } catch {}
+    let wrote = false;
+    try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed])); wrote = true; } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-25000))); wrote = true; } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-10000))); wrote = true; } catch {} } }
+    if (wrote) this._sync = { base: new Set(this.dismissed), stored: true }; },
 };
 
 /* ---------------- Collections ---------------- */
@@ -2045,9 +2165,17 @@ async function renderColl() {
 }
 async function openColl(c, refresh) {
   const ids = await collMembers(c);
-  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { c.z = +e.target.value; await DB.put('colls', c.id, c); openColl(c, true); } })) : '';
+  // The strictness slider and Rename WRITE FIRST and mutate memory only after the put
+  // lands (R6-D7): they used to do it the other way round, so a rejecting put (quota)
+  // failed silently while the sheet went on presenting the unsaved value as the
+  // collection's truth for the whole session. A failed write now says so, memory
+  // keeps the stored value, and the sheet re-renders from it — the slider visibly
+  // returns to what is actually saved. Their writes also stand under the durable-
+  // generation fence (R6-D10's class): a stale tab's edit never lands in a cleared
+  // store. Delete below already had the honest order — it deletes first.
+  const strict = c.type === 'smart' ? h('div', { class: 'field', style: 'margin-top:6px' }, h('label', {}, 'How strict: ', h('b', {}, c.z.toFixed(1))), h('input', { type: 'range', min: '1', max: '4', step: '0.1', value: String(c.z), onchange: async (e) => { const z = +e.target.value; if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That change was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); openColl(c, true); return; } try { await DB.put('colls', c.id, { ...c, z }); } catch (err) { Log.add('ERR', 'collection strictness not saved', err.message); toast(`That change didn't save (${err.message}). Nothing was changed.`, 6000); openColl(c, true); return; } c.z = z; openColl(c, true); } })) : '';
   const sheet = h('div', {}, h('h2', {}, (c.type === 'smart' ? '✦ ' : '★ ') + c.name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos`), strict,
-    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { c.name = nn; await DB.put('colls', c.id, c); openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
+    h('div', { class: 'bar' }, h('button', { class: 'chip' + (Paths.on ? ' on' : ''), onclick: (e) => { Paths.set(!Paths.on); e.currentTarget.classList.toggle('on', Paths.on); applyPaths(); toast(Paths.on ? 'Paths on: each photo whispers where it lives.' : 'Paths hidden.', 2500); } }, 'Path'), h('button', { class: 'btn sm', onclick: () => { Modal.close(); Pick.preset(ids); } }, '✦ Best of these'), h('button', { class: 'btn sm', onclick: async () => { const nn = await prompt2('Rename', '', c.name); if (nn) { if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { toast('That rename was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } try { await DB.put('colls', c.id, { ...c, name: nn }); } catch (err) { Log.add('ERR', 'collection rename not saved', err.message); toast(`That rename didn't save (${err.message}). The collection keeps its old name.`, 6000); return; } c.name = nn; openColl(c, true); renderSearchChips(); } } }, 'Rename'), h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Delete this collection?', '“' + c.name + '” will be removed. Your photos are not touched.', 'Delete', true)) { await DB.del('colls', c.id); L.colls.delete(c.id); Modal.close(); renderColl(); renderSearchChips(); toast('Collection deleted.'); } } }, 'Delete collection')),
     grid(ids, { path: true })); if (refresh) Modal.replace(sheet, true); else Modal.open(sheet, true);
 }
 $('#newColl').onclick = async () => { const q = await prompt2('What should it collect?', 'e.g. my dog at the park, receipts, sunsets', ''); if (!q) return; $('#q').value = q; S.img = null; go('search'); await runSearch(); if (S.q) saveCollDialog(); else { toast('Iris couldn’t search for that — the AI may not be loaded. Nothing was saved.', 4500); go('coll'); } };
@@ -2524,7 +2652,7 @@ async function renderLib() {
     h('div', { class: 'kv' }, h('span', {}, 'In the bin'), h('span', {}, fmtN(L.ids.filter((id) => L.meta.get(id)?.status === 'trash').length))),
     h('div', { class: 'kv' }, h('span', {}, 'Collections'), h('span', {}, fmtN(L.colls.size))),
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Tips: search in any language, like “mi perro en la playa”. Add a minus to exclude: “beach -people”. Long-press a photo to select several.'),
-    ...(Dups.dismissed.size ? [h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm', onclick: () => { localStorage.removeItem('iris-dismissed'); Dups.dismissed.clear(); Dups.groups = null; toast('Hidden groups reset — Clean will regroup your duplicates.'); renderLib(); } }, 'Reset hidden groups'), h('span', { class: 'small', style: 'margin-left:8px' }, fmtN(Dups.dismissed.size) + ' duplicate groups are hidden for good (Keep all).'))] : []),
+    ...(Dups.dismissed.size ? [h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm', onclick: () => { localStorage.removeItem('iris-dismissed'); Dups.dismissed.clear(); if (Dups._sync) Dups._sync = { base: new Set(), stored: false }; Dups.groups = null; toast('Hidden groups reset — Clean will regroup your duplicates.'); renderLib(); } }, 'Reset hidden groups'), h('span', { class: 'small', style: 'margin-left:8px' }, fmtN(Dups.dismissed.size) + ' duplicate groups are hidden for good (Keep all).'))] : []),
     h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn sm danger', onclick: async () => { if (await confirm2('Erase Iris’s memory?', 'Removes the index, collections, folder links and hidden duplicate groups. Your photos are not touched.', 'Erase', true)) { await eraseIndex(); } } }, 'Erase index'))));
   b.append(h('div', { style: 'text-align:center;color:var(--dim);font-size:12px;padding:14px 0 2px;letter-spacing:.3px' }, VER));
 }
@@ -2625,6 +2753,7 @@ async function eraseIndex() {
   Indexer.paused = true;
   Indexer.queue.length = 0; Indexer.later = [];
   for (const f of L.folders.values()) Indexer.removed.add(f.id);
+  try { if (typeof ThumbFix !== 'undefined' && ThumbFix) { ThumbFix.halted = true; ThumbFix.q.length = 0; } } catch {} // the thumbnail fixer is part of the teardown too (R6-D6): its parked decode must not outlive the clear it is about to meet
   let waited = 0;
   while (Indexer.inflight && waited < 15000) { await sleep(50); waited += 50; }
   if (Indexer.inflight) Log.add('warn', 'erase proceeded while a photo was still being understood; its save is fenced by the epoch and will be dropped');
@@ -2663,6 +2792,7 @@ function indexGone() {
   // emptied queues stop new work, the tombstones halt a scan's walk at its next
   // photo, and the shell's work service is told to stop.
   try { Indexer.epoch++; Indexer.paused = true; Indexer.queue.length = 0; Indexer.later = []; for (const f of L.folders.values()) Indexer.removed.add(f.id); } catch {}
+  try { if (typeof ThumbFix !== 'undefined' && ThumbFix) { ThumbFix.halted = true; ThumbFix.q.length = 0; } } catch {} // the thumbnail fixer stops with everything else (R6-D6): a decode parked when the telling lands must not write its thumbnail into the cleared store afterwards
   try { Work.stop(); } catch {}
   const e = new Error('the index was erased in another Iris tab'); e.erased = true;
   bootRecovery(e);
@@ -2765,7 +2895,19 @@ function bootRecovery(e) {
   for (const [id, f] of await DB.all('folders')) { if (f.handle?.__native) Object.setPrototypeOf(f.handle, NDir.prototype); L.folders.set(id, f); }
   if (NATIVE && !Nat.has()) Nat.ask();
   for (const [id, c] of await DB.all('colls')) L.colls.set(id, c);
-  try { const g = await DB.get('kv', 'indexGen'); Indexer.gen = g == null ? null : g; } catch {} // the durable index generation this tab begins under: every writer compares against it, so another tab's erase is seen the moment it lands (R5-D3)
+  // The durable index generation this tab begins under: every writer compares against
+  // it, so another tab's erase is seen the moment it lands (R5-D3). The token must
+  // EXIST for that comparison to mean anything (R6-P2): a tab that learned "no token"
+  // (null) on a never-erased store could not tell that store from one another tab had
+  // JUST cleared — eraseIndex clears first and stamps after, and in that gap the
+  // cleared store reads exactly like a virgin one, so the very first erase in the
+  // database's life was invisible to every null-learned tab. So boot makes the token
+  // exist: on a store that has none, this tab stamps one and then learns whatever
+  // stands (its own stamp, or another tab's if two first boots race — the loser of
+  // that race sees the generation "move" once, is told, and reloads into the truth).
+  // From then on a token is absent only inside an erase's own clear→stamp breath,
+  // where absent ≠ learned, and every writer stands down.
+  try { let g = await DB.get('kv', 'indexGen'); if (g == null) { const mine = Date.now().toString(36) + Math.random().toString(36).slice(2); try { await DB.put('kv', 'indexGen', mine); g = await DB.get('kv', 'indexGen'); } catch {} } Indexer.gen = g == null ? null : g; } catch {}
   Backup.on = !!(await DB.get('kv', 'adoptPool'));
   UI.pendingScan = !!(await DB.get('kv', 'pendingScan'));
   { const smp = L.ids.filter((id) => id.startsWith('sample:')); if (smp.length) { await DB.removeItems(smp); smp.forEach((id) => L.meta.delete(id)); L.rebuild(); Log.add('info', 'removed sample photos', smp.length); } } // samples are gone for good
