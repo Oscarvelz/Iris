@@ -6,20 +6,33 @@ let heif = null;
 const isHeif = (f) => /\.(heic|heif)$/i.test(f.name || '') || /hei[cf]/i.test(f.type || '');
 async function decodeHeif(file) {
   if (!heif) { importScripts(HEIF_URL); heif = self.libheif(); }
-  const dec = new heif.HeifDecoder(); const imgs = dec.decode(new Uint8Array(await file.arrayBuffer()));
-  if (!imgs || !imgs.length) throw new Error('empty HEIF');
-  const im = imgs[0]; const w = im.get_width(), h = im.get_height();
-  const data = await new Promise((res, rej) => im.display({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }, (r) => r ? res(r) : rej(new Error('HEIF decode failed'))));
-  for (const i of imgs) try { i.free && i.free(); } catch {}
-  try { dec.decoder && heif.heif_context_free && heif.heif_context_free(dec.decoder); } catch {}
-  return createImageBitmap(new ImageData(data.data, w, h));
+  // From here the library is in hand, so a failure inside the flagged region
+  // is libheif ANSWERING with an error about the file, and the thrown error
+  // carries lib: 1 so the answer can be told from the silence of a library
+  // that never loaded (R9-PS2). The import above stays outside the region —
+  // its failure carries no flag — and the file's bytes are read before it
+  // too: a read failure is not the library's answer either.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  try {
+    const dec = new heif.HeifDecoder(); const imgs = dec.decode(bytes);
+    if (!imgs || !imgs.length) throw new Error('empty HEIF');
+    const im = imgs[0]; const w = im.get_width(), h = im.get_height();
+    const data = await new Promise((res, rej) => im.display({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }, (r) => r ? res(r) : rej(new Error('HEIF decode failed'))));
+    for (const i of imgs) try { i.free && i.free(); } catch {}
+    try { dec.decoder && heif.heif_context_free && heif.heif_context_free(dec.decoder); } catch {}
+    return await createImageBitmap(new ImageData(data.data, w, h));
+  } catch (e) { const err = new Error(e && e.message || e); err.lib = 1; throw err; }
 }
 // bitmap() also reports whether libheif did the decoding (lib): the browser's own
 // decoder succeeding — above all on the shell's resized JPEG copy of a HEIC photo,
 // which keeps the .heic name over JPEG bytes — says nothing about the library, and
 // the page's HEIC circuit breaker may only credit an answer to the library that
-// actually produced it (R7-P2). An answer that fails carries no lib: a failed
-// decode is not the library answering.
+// actually produced it (R7-P2). A failure reached BEFORE libheif — the import
+// itself failing — carries no lib: the library never answered. But a failure
+// INSIDE decodeHeif, after the library loaded, is flagged lib: 1 by decodeHeif
+// itself (R9-PS2): the library answered with an error about the file, which
+// ends the silence the breaker tripped on — the page credits the answering
+// toward revival, while the decode still counts as failed for the photo.
 async function bitmap(file) {
   try { return { bmp: await createImageBitmap(file), lib: 0 }; }
   catch (e) { if (isHeif(file)) return { bmp: await decodeHeif(file), lib: 1 }; throw new Error('can’t decode ' + (file.type || file.name) + ': ' + (e && e.message || e)); }
@@ -54,7 +67,7 @@ async function prep(file, ow = 0, oh = 0) {
   return { bytes, thumb, w: W, h: H, bright, sharp, dh, lib: bd.lib };
 }
 onmessage = async ({ data }) => {
-  if (data.op === 'big') { try { const r = await big(data.file); postMessage({ id: data.id, p: r.p, lib: r.lib, heavy: isHeif(data.file) ? 1 : 0 }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e) }); } return; }
+  if (data.op === 'big') { try { const r = await big(data.file); postMessage({ id: data.id, p: r.p, lib: r.lib, heavy: isHeif(data.file) ? 1 : 0 }); } catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e), ...(e && e.lib ? { lib: 1 } : {}) }); } return; }
   try { const p = await prep(data.file, data.ow, data.oh); const lib = p.lib || 0; delete p.lib; postMessage({ id: data.id, p, lib, heavy: isHeif(data.file) ? 1 : 0 }, p ? [p.bytes.buffer] : []); }
-  catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e), heavy: isHeif(data.file) ? 1 : 0 }); }
+  catch (e) { postMessage({ id: data.id, p: null, err: String(e && e.message || e), ...(e && e.lib ? { lib: 1 } : {}), heavy: isHeif(data.file) ? 1 : 0 }); }
 };

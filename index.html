@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.85';
+const VER = 'Iris 2.86';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -626,7 +626,7 @@ async function sweepOrphans(onlyFolder = null) {
     const keys = (s) => new Promise((res, rej) => { const q = DB.tx([s]).objectStore(s).getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
     const all = new Set(); for (const s of ['meta', 'vecs', 'thumbs']) for (const k of await keys(s)) all.add(k);
     const dead = [...all].filter((id) => !L.meta.has(id) && !Indexer.queued.has(id) && (!onlyFolder || id.startsWith(onlyFolder + ':')));
-    if (dead.length) { await DB.removeItems(dead); Log.add('info', 'collected orphan records', dead.length); }
+    if (dead.length) { await DB.removeItems(dead); if (typeof Prep !== 'undefined' && Prep.forgetVote) for (const id of dead) Prep.forgetVote(id); Log.add('info', 'collected orphan records', dead.length); }
     return dead.length;
   } catch { return 0; }
 };
@@ -1392,6 +1392,22 @@ const Prep = {
   // a record id never depends on the file at all, which is what makes it
   // stable across the web and native doors alike.
   keyOf(f, id) { return id ? 'id:' + id : f ? (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0) : ''; },
+  // A record's death withdraws its vote (R9-PS1): the ledger keys on the
+  // record id, and a folder's remove+re-add re-mints every record under it,
+  // so one photo could vote under its old record, be forgotten with it, and
+  // vote again under the new one — two witnesses in the ledger, one photo
+  // in the world, tripping the breaker against its own law. Every path by
+  // which this tab strikes a record from its world calls this as the record
+  // goes — folder removal, the scan's sweep of vanished files, deletion
+  // from the device, the orphan sweep, and setStatus pruning a record the
+  // store no longer holds: the vote leaves with the record and the count
+  // falls with it, so each record is exactly one witness for exactly as
+  // long as it lives. The bound is the identity model itself, stated
+  // plainly: a photo whose record dies and is re-minted starts as a FRESH
+  // witness — its first vote is gone, not doubled. (A vote cast under
+  // keyOf's id-less triple fallback has no record to die with; no
+  // production caller is id-less, so that gap has no caller.)
+  forgetVote(id) { const seen = this._heifCounted; if (!seen || !id) return; if (seen.delete('id:' + id) && this.heifSilent > 0) this.heifSilent--; },
   init() { if (this.pool.length || !this.ok) return; try { this.n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < this.n; k++) this.spawn(k); } catch { this.ok = false; } },
   spawn(k) {
     const w = new Worker('prep-worker.js'); w.jobs = new Map(); w.heavy = 0; w.retire = false;
@@ -1402,7 +1418,12 @@ const Prep = {
     // photo — and that answer never spoke for the library. An answer with no
     // lib field (a worker from before the flag existed) is tolerated and
     // credited with nothing. A credited answer also clears the vote ledger:
-    // a new run of silence starts with fresh witnesses (R7-P1).
+    // a new run of silence starts with fresh witnesses (R7-P1). The credit
+    // is for the ANSWERING, whatever the answer's outcome: an error answer
+    // from inside the worker's decodeHeif carries the flag too (R9-PS2),
+    // because a library that answered with an error about the file has
+    // ended the silence the trip was about — while the photo's decode
+    // itself still resolves as failed, exactly as its outcome says.
     w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p && p.heif && data.lib) { this.heifSilent = 0; this._heifCounted?.clear(); if (this.heifDead) { this.heifDead = false; Log.add('warn', 'the HEIC decoder library answered again — HEIC photos are no longer paused', 'libheif'); } } if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
     w.onerror = (e) => { e.preventDefault?.(); this.crash(k, w, e.message || 'out of memory'); };
     this.pool[k] = w;
@@ -1650,7 +1671,7 @@ async function setStatus(ids, status) { const ms = []; for (const id of ids) { c
   try { gone = await DB.putMetasIfLive(ms.map((m) => ({ ...m, status }))); } catch (e) { Log.add('ERR', 'status change not saved', e.message); toast(`That change didn't save (${e.message}). Nothing was moved.`, 6000); return false; }
   const goneSet = new Set(gone);
   for (const m of ms) if (!goneSet.has(m.id)) m.status = status;
-  if (gone.length) { const names = gone.map((id) => L.meta.get(id)?.name || id); for (const id of gone) L.meta.delete(id); L.rebuild(); Log.add('warn', 'status change skipped photos that are no longer in the index', names.join(', ')); }
+  if (gone.length) { const names = gone.map((id) => L.meta.get(id)?.name || id); for (const id of gone) L.meta.delete(id); if (typeof Prep !== 'undefined' && Prep.forgetVote) for (const id of gone) Prep.forgetVote(id); L.rebuild(); Log.add('warn', 'status change skipped photos that are no longer in the index', names.join(', ')); }
   Junk.cache = null; Junk.epoch++; // statuses changed, so the live set Junk scored has changed too — its count-keyed cache must not outlive a bin move or a restore (D-3); the epoch move also tells a Junk compute still in flight that its world has moved (R3-I5)
   UI.binCount(); return true; }
 
@@ -1795,7 +1816,7 @@ const Folders = {
     // world's records, swept out of an index this tab no longer owned.
     if (await this._erased()) { toast('That folder was not removed — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
     Indexer.removed.add(f.id); if (Indexer.later) Indexer.later = Indexer.later.filter((x) => x !== f); // a check in flight must not resurrect it
-    const ids = L.ids.filter((id) => L.meta.get(id)?.folder === f.id); await DB.removeItems(ids); ids.forEach((id) => L.meta.delete(id)); L.rebuild();
+    const ids = L.ids.filter((id) => L.meta.get(id)?.folder === f.id); await DB.removeItems(ids); if (typeof Prep !== 'undefined' && Prep.forgetVote) ids.forEach((id) => Prep.forgetVote(id)); ids.forEach((id) => L.meta.delete(id)); L.rebuild();
     await DB.del('folders', f.id); L.folders.delete(f.id); await sweepOrphans(f.id); UI.refreshAll(); toast(`Removed ${f.name} from Iris. Your files are untouched.`);
   },
   stats: { skippedTypes: {}, dirErrors: 0, hidden: 0, trees: 0 },
@@ -1886,7 +1907,7 @@ const Indexer = {
         // sweep, no folder write, no disarm (that writes too), no success word.
         if (await this.genMoved()) { Log.add('warn', 'scan stopped at its final step: the index was erased in another tab', f.name); this.scanning = ''; this.curF = null; if (typeof indexGone === 'function') indexGone(); return; }
         const gone = L.ids.filter((id) => L.meta.get(id)?.folder === f.id && !seen.has(id));
-        if (gone.length) { await DB.removeItems(gone); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); Dups.groups = null; } // records died here: cached duplicate groups must not outlive them, whatever the AI does later (D-2)
+        if (gone.length) { await DB.removeItems(gone); if (typeof Prep !== 'undefined' && Prep.forgetVote) gone.forEach((id) => Prep.forgetVote(id)); gone.forEach((id) => L.meta.delete(id)); L.rebuild(); Dups.groups = null; } // records died here: cached duplicate groups must not outlive them, whatever the AI does later (D-2); their HEIC votes are withdrawn with them (R9-PS1)
         // The ask above guarded the sweep; the sweep itself is an await whose
         // length scales with the library, and the folder-record put after it
         // used to ride that one ask (R8-D2): an erase landing inside the sweep
@@ -2564,7 +2585,7 @@ async function deleteFromDevice(ids) {
       try { await d.removeEntry(m.name); ok++; removed.push(m.id); } catch (e) { console.warn(e); fail++; } } }
   let localGone = 0; // picked photos are only removed from Iris — under the same promise, re-checked just before their records go
   for (const id of local) { let sm = null; try { sm = await DB.get('meta', id); } catch {} if (sm && sm.status !== 'trash') { spared++; const lm = L.meta.get(id); if (lm) lm.status = sm.status; } else { removed.push(id); localGone++; } }
-  await DB.removeItems(removed); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Junk.epoch++; Dups.groups = null;
+  await DB.removeItems(removed); if (typeof Prep !== 'undefined' && Prep.forgetVote) removed.forEach((id) => Prep.forgetVote(id)); removed.forEach((id) => L.meta.delete(id)); L.rebuild(); Junk.cache = null; Junk.epoch++; Dups.groups = null;
   UI.refreshAll(); toast((spared ? `${spared} photo${spared === 1 ? ' was' : 's were'} spared — no longer in the bin. ` : '') + (fail ? `Deleted ${ok}. ${fail} couldn’t be deleted (the browser or Android refused).` : ok ? `Deleted ${ok} photo${ok === 1 ? '' : 's'} from your phone.` + (localGone ? ` Removed ${localGone} from Iris.` : '') : localGone ? `Removed ${localGone} from Iris.` : 'Nothing was deleted.'), 4500);
 }
 
@@ -2582,8 +2603,10 @@ const Viewer = {
     // blink, not a verdict: the entry is dropped by identity, like the native
     // stall's, so the next visit asks again instead of serving the cached null
     // all session (R7-PS1). The blink is logged, as the stall's failure is: a
-    // photo whose folder blinks on every visit leaves a word in Diagnostics on
-    // every visit, instead of failing in silence forever (R8-PS1). A failed
+    // photo whose folder blinks on every visit leaves a word in Diagnostics,
+    // instead of failing in silence forever (R8-PS1) — a word under repeat
+    // discipline (R9-P1, blinkSay below), so it cannot flood the log it
+    // testifies in. A failed
     // DECODE is a verdict about the photo and keeps its cached null —
     // stepping back onto an undecodable HEIC must not
     // re-pay the prep ladder on every visit; the #vFull button remains the
@@ -2591,8 +2614,8 @@ const Viewer = {
     const c = { url: null, blob: false }; c.p = (async () => {
       let u = null; const np = this.fastNative() && this.natPath(id);
       if (np) u = NAT_URL.replace('/f?', '/v?') + encodeURIComponent(np) + '&w=' + Math.min(2560, Math.round(Math.max(innerWidth, innerHeight) * (devicePixelRatio || 1)));
-      else { const f = await Folders.fileFor(id, false); if (!f) { if (this.cache.get(id) === c) this.cache.delete(id); Log.add('warn', 'the original file could not be fetched — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
-      c.url = u; const im = new Image(); im.src = u;
+      else { const f = await Folders.fileFor(id, false); if (!f) { if (this.cache.get(id) === c) this.cache.delete(id); if (this.blinkSay(id)) Log.add('warn', 'the original file could not be fetched — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
+      if (this._blinkTold) this._blinkTold.delete(id); c.url = u; const im = new Image(); im.src = u;
       // The native /v load joins the shell's stall discipline (R5-P3): this path
       // builds the endpoint's URL itself and used to await the decode bare, so a
       // shell that accepted and then went silent parked the promise forever —
@@ -2609,6 +2632,17 @@ const Viewer = {
     this.cache.set(id, c); while (this.cache.size > 7) { const [k, o] = this.cache.entries().next().value; this.cache.delete(k); if (o.blob) o.p.then(() => o.url && URL.revokeObjectURL(o.url)); }
     return c.p;
   },
+  // Repeat discipline for the blink's word (R9-P1): the fetch-failure face
+  // in full() fires per call — the show and its three neighbour warms — and
+  // a failed entry is never cached, so one pass through an unreachable
+  // folder wrote the same sentence over a hundred times and evicted every
+  // other line from the log's persisted witness. The word still lands: a
+  // photo's first failure always speaks, and its repeats speak while the
+  // session's repeat ration lasts — the indexer's own skipped ration,
+  // five — after which the failure is counted here and not written. A
+  // photo that loads again clears its mark (at full()'s success above),
+  // so a later failure episode earns its own first word.
+  blinkSay(id) { const told = this._blinkTold || (this._blinkTold = new Set()); if (!told.has(id)) { told.add(id); return true; } return (this._blinkMore = (this._blinkMore || 0) + 1) <= 5; },
   warm(id) { if (L.meta.has(id)) this.full(id).catch(() => {}); },
   // The rescue's word: an announcement must never be able to break the rescue itself.
   note(msg) { try { toast(msg, 3000); } catch {} },
