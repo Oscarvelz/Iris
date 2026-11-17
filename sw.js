@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v85';
+const VERSION = 'iris-v86';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {
@@ -24,6 +24,14 @@ self.addEventListener('activate', (e) => {
     // app's first days and is a suspect in the worker's 'ModuleFactory not set' failure — a bad
     // cached body for the WASM loader would be served forever. Its replacement is versioned.
     caches.keys().then((keys) => Promise.all(keys.filter((k) => (k.startsWith('iris-v') && k !== VERSION) || k === 'iris-runtime').map((k) => caches.delete(k))))
+      // A runtime cache inherited from an older worker gets one honest audit (R4-PS1):
+      // a worker from before plausibleRuntime could have cached an impostor body into
+      // the shared 'iris-runtime-2', and this worker would otherwise inherit it as its
+      // known-good fallback. A cached entry that fails the same check a fresh response
+      // must pass is provably not the runtime — code or WASM is never HTML, JSON or
+      // empty — so it is dropped; everything plausible is kept untouched (version skew
+      // of genuine code is undetectable in principle and stays out of scope).
+      .then(async () => { try { const rc = await caches.open('iris-runtime-2'); for (const req of await rc.keys()) { const hit = await rc.match(req); if (hit && !(await plausibleRuntime(hit))) await rc.delete(req); } } catch {} })
       .then(() => self.clients.claim())
   );
 });
@@ -35,8 +43,13 @@ self.addEventListener('activate', (e) => {
 // document: a response that declares itself HTML, or whose first non-space character
 // opens markup, is not the runtime however it is labelled. Anything we cannot inspect
 // is NOT distrusted on our own failure — the check must never break a healthy update.
+// Nor is it only documents (R4-P2): an edge's JSON error payload and an empty body
+// under a 200 are not the runtime either, so a JSON content type, a body whose first
+// non-space character opens a JSON value, and a body that inspects as empty all fail
+// the same way. When in doubt the handler falls back to the cached copy, never to the
+// network body — and a body we cannot inspect at all is still trusted, as before.
 async function plausibleRuntime(res) {
-  try { const ct = res.headers && typeof res.headers.get === 'function' ? (res.headers.get('content-type') || '') : ''; if (/text\/html/i.test(ct)) return false; } catch {}
+  try { const ct = res.headers && typeof res.headers.get === 'function' ? (res.headers.get('content-type') || '') : ''; if (/text\/html|application\/json|\+json/i.test(ct)) return false; } catch {}
   let head = null;
   try {
     const body = res.clone().body;
@@ -50,7 +63,9 @@ async function plausibleRuntime(res) {
   } catch {}
   if (head === null) { try { if (typeof res.body === 'string') head = res.body.slice(0, 512); } catch {} }
   if (head === null) return true;
-  return !head.trimStart().startsWith('<');
+  const t = head.trimStart();
+  if (!t) return false;
+  return !t.startsWith('<') && !t.startsWith('{') && !t.startsWith('[');
 }
 
 self.addEventListener('fetch', (e) => {

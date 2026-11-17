@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.70';
+const VER = 'Iris 2.71';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -900,8 +900,14 @@ const AI = {
   mp: null, fileset: null, emb: null, delegate: '', state: 'off', textCache: new Map(), msPer: 0, WT: { init: 180000, text: 30000, image: 120000 }, DL_STALL: 180000,
   setPill(state, text) { const was = this.state; this.state = state; if (was !== state) setTimeout(() => UI.renderIndex?.(), 0); $('#pdot').className = 'dot ' + ({ ok: 'ok', busy: 'busy', err: 'err' }[state] || ''); $('#ptext').textContent = text; },
   async runtime() {
-    if (!this.mp) this.mp = await import(RT + '/retrieval_bundle.mjs');
-    if (!this.fileset) this.fileset = await this.mp.FilesetResolver.forRetrievalTasks(RT + '/wasm');
+    // The page fallback's imports ride the stall budget too (R4-P3): they travel on
+    // the service worker's network-first fetch, which has no timeout of its own, so a
+    // CDN connection that accepts and then goes silent used to park the load — and
+    // every caller queued behind it — forever. The race cannot cancel the import,
+    // but it fails the load honestly inside the same span the downloads already live
+    // by; an import that lands after its race was lost is simply never awaited again.
+    if (!this.mp) this.mp = await this.stall(import(RT + '/retrieval_bundle.mjs'));
+    if (!this.fileset) this.fileset = await this.stall(this.mp.FilesetResolver.forRetrievalTasks(RT + '/wasm'));
   },
   PART: 16 * 1024 * 1024,
   key(i) { return 'https://iris-model.invalid/eg2-tv440/part/' + i; },
@@ -998,10 +1004,27 @@ const AI = {
     // — and its error path then deleted the manifest this swap had just written, while
     // the race's other face quietly built the OLD model under a "loaded" toast. Wait
     // for any in-flight load to settle first; only then is the cache ours to replace.
-    while (this._loading) { try { await this._loading; } catch {} }
-    this.setPill('busy', 'Saving model…'); const c = await caches.open('iris-model-v2'); let n = 0; const sums = [];
-    try { for (let a = 0; a < file.size; a += this.PART, n++) sums[n] = await this.putPart(c, n, await file.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: file.size, parts: n, sums }))); }
-    catch (e) { this.blob = file; toast('Using the file without saving it.', 4000); }
+    // The wait itself is bounded now (R4-P3): it used to trust the joined load to
+    // settle, but a load could park for good (its page fallback's runtime import had
+    // no budget of its own), and this tap then did nothing at all — not even the pill,
+    // which was only set after the wait. The pill announces the tap first, and a load
+    // still unfinished after a full stall span of waiting fails the tap honestly
+    // instead of stranding it; nothing has been written either way.
+    this.setPill('busy', 'Saving model…');
+    const waitStart = Date.now();
+    while (this._loading) { try { await Promise.race([this._loading, sleep(200)]); } catch {} if (this._loading && Date.now() - waitStart >= this.DL_STALL) throw new Error('The AI is still busy loading — give it a moment, then try the file again.'); }
+    // While the swap runs, the cache is this swap's alone (R4-P4): the flag flies
+    // from before the first part is written until the manifest lands, and load()
+    // refuses to start under it. A load that began mid-swap otherwise read a half-old,
+    // half-new cache as if it were whole — on the summed path it died blaming the new
+    // file's integrity and deleted the manifest out from under the swap, and on a
+    // legacy sum-less cache it silently built a mixed old/new embedder.
+    this._swapping = true;
+    try {
+      const c = await caches.open('iris-model-v2'); let n = 0; const sums = [];
+      try { for (let a = 0; a < file.size; a += this.PART, n++) sums[n] = await this.putPart(c, n, await file.slice(a, a + this.PART).arrayBuffer()); await c.put(this.MAN, new Response(JSON.stringify({ total: file.size, parts: n, sums }))); }
+      catch (e) { this.blob = file; toast('Using the file without saving it.', 4000); }
+    } finally { this._swapping = false; }
     this.emb = null; await this.load();
   },
   async load() {
@@ -1018,6 +1041,13 @@ const AI = {
     // promise: one logical load builds exactly one embedder, whoever wins.
     const p = (async () => {
       try {
+        // A fromFile swap in progress owns the model cache (R4-P4): starting here
+        // would read a half-replaced cache as if it were whole — dying on a false
+        // integrity error over the user's good file (and deleting its manifest on
+        // the way out), or, on a legacy sum-less cache, silently building a mixed
+        // embedder. Refuse honestly instead; a swap takes seconds, and fromFile's
+        // own load() runs the moment it lands.
+        if (this._swapping) throw new Error('The AI model is being replaced — a moment, then try again.');
         if (!(await this.cached())) await this.download();
         this.setPill('busy', 'Starting AI…');
         try { this.emb = await this.startWorker(); }
@@ -1081,16 +1111,27 @@ const IS_EDGE = /\bEdgA?\//.test(navigator.userAgent) || NATIVE; // both: hide t
    pipeline (and the photo's true dimensions in the reply headers) instead of hauling the whole
    original into a JS decoder. Any failure quietly falls back to the original file. */
 const NatSized = {
+  STALL: 180000, // the shell endpoints live by the model download's stall span (AI.DL_STALL), kept in step with it
+  // One bounded wait for the shell's file endpoints (R4-P1): AI.stall cured this
+  // physics for the model download, but the shell's /v and /f fetches were issued
+  // bare — an endpoint that accepts and then goes silent never rejects, so the
+  // indexer (which awaits these photo by photo), the thumb queue and the viewer's
+  // full-size load parked forever: no error, no log, the wake lock held. The budget
+  // bounds SILENCE, exactly as the download's does — an endpoint still delivering is
+  // left alone — and a silent one fails the wait, so the caller falls back or reports
+  // honestly instead of parking. The fetch is aborted too, so the wait really ends it.
+  async stall(p) { const pr = Promise.resolve(p); pr.catch(() => {}); let t = 0, silent = false; const to = new Promise((_, rej) => { t = setTimeout(() => { silent = true; rej(new Error('the shell went silent')); }, this.STALL); }); try { return await Promise.race([pr, to]); } catch (e) { if (silent) throw new Error('the shell went silent'); throw e; } finally { clearTimeout(t); } },
+  async get(url) { const ac = typeof AbortController === 'function' ? new AbortController() : null; const killer = ac ? setTimeout(() => { try { ac.abort(); } catch {} }, this.STALL) : 0; try { return await this.stall(fetch(url, ac ? { signal: ac.signal } : undefined)); } finally { clearTimeout(killer); } },
   async swap(file, w, dims = true) {
     if (!NATIVE || !file?.__np) return null;
     try {
-      const r = await fetch(NAT_URL.replace('/f?', '/v?') + encodeURIComponent(file.__np) + '&w=' + w);
+      const r = await this.get(NAT_URL.replace('/f?', '/v?') + encodeURIComponent(file.__np) + '&w=' + w);
       if (!r.ok) return null;
-      const b = await r.blob(); if (!b.size) return null;
+      const b = await this.stall(r.blob()); if (!b.size) return null;
       const ow = parseInt(r.headers.get('X-Iris-OW')) || 0, oh = parseInt(r.headers.get('X-Iris-OH')) || 0;
       if (dims && (!ow || !oh)) return null; // a shell older than 2.33 sends no dimensions: stay on the original file rather than store the small copy's size
       return { file: new File([b], file.name, { type: 'image/jpeg', lastModified: file.lastModified }), ow, oh };
-    } catch { return null; }
+    } catch (e) { if (e && /went silent/.test(e.message || '')) Log.add('warn', 'the shell did not answer in time; using the original photo', file.name); return null; }
   },
 };
 const Prep = {
@@ -1292,8 +1333,8 @@ const Nat = {
   root: '',
 };
 class NFile { constructor(path, name, s, m) { this.__native = path; this.name = name; this.kind = 'file'; this.s = s; this.m = m; }
-  async getFile() { const r = await fetch(NAT_URL + encodeURIComponent(this.__native)); if (!r.ok) throw new DOMException('Could not read ' + this.name, 'NotReadableError');
-    const b = await r.blob(); const f = new File([b], this.name, { type: b.type, lastModified: this.m || Date.now() }); f.__np = this.__native; return f; } }
+  async getFile() { let r, b; try { r = await NatSized.get(NAT_URL + encodeURIComponent(this.__native)); if (r.ok) b = await NatSized.stall(r.blob()); } catch (e) { throw new DOMException(e && e.message === 'the shell went silent' ? 'The shell did not answer in time while reading ' + this.name : 'Could not read ' + this.name, 'NotReadableError'); } if (!r.ok) throw new DOMException('Could not read ' + this.name, 'NotReadableError');
+    const f = new File([b], this.name, { type: b.type, lastModified: this.m || Date.now() }); f.__np = this.__native; return f; } }
 class NDir { constructor(path, name) { this.__native = path; this.name = name ?? path.split('/').pop(); this.kind = 'directory'; }
   async *entries() { for (const e of Nat.call('list', this.__native)) { const p = this.__native + '/' + e.n; yield [e.n, e.d ? new NDir(p, e.n) : new NFile(p, e.n, e.s, e.m)]; } }
   async getDirectoryHandle(n) { const p = this.__native + '/' + n; if (!Nat.call('isDir', p)) throw new DOMException(n + ' not found', 'NotFoundError'); return new NDir(p, n); }
@@ -2375,6 +2416,11 @@ async function eraseIndex() {
   if (Indexer.inflight) Log.add('warn', 'erase proceeded while a photo was still being understood; its save is fenced by the epoch and will be dropped');
   await DB.clear();
   localStorage.removeItem('iris-dismissed');
+  // The shell's WorkService is part of the teardown (R4-P5): it stops only on the
+  // bridge's workStop, and after the reload the new page's Work starts with bg=false,
+  // so a stop not sent now can never be sent — the "Iris is working" foreground
+  // service would outlive the erase until some future indexing run happens to end.
+  Work.stop();
   location.reload();
 }
 /* The receiving side of an erase (R3-P7): when another tab deletes the index, this
@@ -2391,7 +2437,7 @@ function indexGone() {
   bootRecovery(e);
 }
 function bootRecovery(e) {
-  Log.add('ERR', e?.erased ? 'the index was erased in another Iris tab — this tab is showing its copy from memory only' : 'boot stopped: the index would not open', e);
+  Log.add('ERR', e?.erased ? 'the index was erased in another Iris tab — this tab is showing its copy from memory only' : e?.slow ? 'the index is taking a long time to open — the recovery surface is up while the open keeps trying' : 'boot stopped: the index would not open', e);
   let gone = false; const reload = () => { if (!gone) { gone = true; location.reload(); } };
   const blocked = !!e?.blocked;
   const waitNote = h('p', { class: 'sub', style: 'display:none' }, 'Waiting for the other Iris tab to close — the erase finishes on its own as soon as it does.');
@@ -2406,7 +2452,7 @@ function bootRecovery(e) {
   };
   const ov = h('div', { class: 'ov on' }, h('div', { class: 'scrim' }), h('div', { class: 'sheet' },
     h('h2', {}, e?.erased ? 'Iris’s index was erased in another tab' : 'Iris can’t open its index'),
-    h('p', { class: 'sub' }, e?.erased ? 'Another Iris tab erased the index, so this tab’s copy of your library now lives only in its memory — nothing here can be saved anymore, and the photos it shows are the ones that were there before the erase. Reload to start from the clean slate the erase left. Your photos themselves are not touched.' : blocked ? 'Another Iris tab is holding the index open, so this tab has to wait. Close the other Iris tab, then tap Try again. Your photos themselves are not touched.' : 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
+    h('p', { class: 'sub' }, e?.erased ? 'Another Iris tab erased the index, so this tab’s copy of your library now lives only in its memory — nothing here can be saved anymore, and the photos it shows are the ones that were there before the erase. Reload to start from the clean slate the erase left. Your photos themselves are not touched.' : blocked ? 'Another Iris tab is holding the index open, so this tab has to wait. Close the other Iris tab, then tap Try again. Your photos themselves are not touched.' : e?.slow ? 'Opening the index is taking far longer than usual. It may be slow storage, or something may be holding it up — Iris cannot tell which, so it keeps trying: if the index arrives, the app reloads itself. You can also tap Try again, or erase the index and let Iris rebuild it. Your photos themselves are not touched.' : 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
     waitNote,
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: reload }, 'Try again'), eraseBtn)));
   ov.id = 'bootFail'; document.body.append(ov);
@@ -2444,11 +2490,19 @@ function bootRecovery(e) {
   // An open can also park without ever settling (R2-P9): queued behind another tab's
   // pending deletion, its promise neither resolves nor rejects, and boot would sit on a
   // blank page with no surface and no trace. If the open has not settled in 6 s, land on
-  // the recovery surface with the honest reason; if the open later succeeds (the other
-  // tab closed), reload into the clean boot it unblocked.
+  // the recovery surface — with the honest reason, which is that we do not know the
+  // reason (R4-P6): this watchdog used to FABRICATE blocked=true out of nothing but
+  // unsettledness, and the surface then told the user another Iris tab was holding the
+  // index — a specific cause, with a remedy to match, manufactured from no evidence; a
+  // pending version upgrade between two raw pages produced the same park with no Iris
+  // tab anywhere. So the slow surface claims only slowness, and the heal is real this
+  // time: if the open later succeeds, reload into the clean boot it unblocked — and a
+  // fresh open is retried every 10 s besides, because one blockage class (an upgrade
+  // request that dies with its requester) strands the original request for good while
+  // a fresh one succeeds at once.
   const openP = DB.open();
   let openSlow = false;
-  const slowTimer = setTimeout(() => { openSlow = true; const e = new Error('the index is waiting for another Iris tab to close'); e.blocked = true; bootRecovery(e); openP.then(() => location.reload(), () => {}); }, 6000);
+  const slowTimer = setTimeout(() => { openSlow = true; const e = new Error('the index is taking a long time to open'); e.slow = true; bootRecovery(e); openP.then(() => location.reload(), () => {}); const retry = setInterval(() => { DB.open().then(() => { clearInterval(retry); location.reload(); }, () => {}); }, 10000); openP.then(() => clearInterval(retry), () => clearInterval(retry)); }, 6000);
   try { await openP; clearTimeout(slowTimer); if (openSlow) return; } catch (e) { clearTimeout(slowTimer); if (openSlow) return; bootRecovery(e); return; }
   const metas = new Map(await DB.all('meta')); const vecs = await DB.all('vecs');
   // A stored vector that is not exactly one model's worth of bytes is damaged goods
