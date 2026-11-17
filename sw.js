@@ -1,6 +1,6 @@
 // Iris service worker: app shell + MediaPipe runtime cached for offline use.
 // The AI model itself is cached by the app in the 'iris-model' cache.
-const VERSION = 'iris-v105';
+const VERSION = 'iris-v106';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-180.png', './ai-worker.js', './prep-worker.js'];
 
 self.addEventListener('install', (e) => {

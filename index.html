@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.90';
+const VER = 'Iris 2.91';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -626,6 +626,23 @@ const DB = {
   // longer stands, 'unjudged' when the caller held no token and one appeared
   // inside the gap — nothing is written in either case.
   putCollIfLive(coll, gen) { return new Promise((res, rej) => { const ids = Array.isArray(coll.ids) ? coll.ids : null; const t = this.tx(gen === undefined ? ['colls', 'meta'] : ['colls', 'meta', 'kv'], 'readwrite'); let out = false; const write = () => { if (!ids || !ids.length) { t.objectStore('colls').put(coll, coll.id); out = coll; return; } const keep = new Array(ids.length).fill(false); let left = ids.length; ids.forEach((id, i) => { const q = t.objectStore('meta').get(id); q.onsuccess = () => { keep[i] = !!q.result; if (--left === 0) { const landed = { ...coll, ids: ids.filter((_, j) => keep[j]) }; t.objectStore('colls').put(landed, coll.id); out = landed; } }; }); }; if (gen === undefined) write(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) write(); else if (gen === null && cur !== null) out = 'unjudged'; }; } t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
+  // The collection take-back's delete (R11-DS3 + R11-S2): a newborn shell is
+  // deleted only if it is STILL the shell at the writing moment. The
+  // take-back used to delete by id under the generation fence alone and
+  // never re-asked the question it exists for — is it still empty? A third
+  // tab that had loaded the shell could add a living member through its own
+  // putCollIfLive in the breath between the landing and the delete, and the
+  // delete took the collection whole, member and all. Here the record is
+  // read inside the deleting transaction and dies only if what the store
+  // holds is still a set collection with zero members. Resolves 'gone' when
+  // the shell is gone (deleted here, or already absent — the take-back's
+  // end state either way), 'kept' when the store's record is no longer the
+  // emptied shell (a member landed meanwhile, or the record is not an
+  // emptied set at all) so the collection stands, false when the generation
+  // the caller named no longer stands, and 'unjudged' when the caller held
+  // no token and one appeared inside the gap — the family's tri-state law,
+  // judged in the same transaction.
+  delCollIfEmpty(id, gen) { return new Promise((res, rej) => { const t = this.tx(gen === undefined ? ['colls'] : ['colls', 'kv'], 'readwrite'); let out = false; const write = () => { const q = t.objectStore('colls').get(id); q.onsuccess = () => { const cur = q.result; if (!cur) { out = 'gone'; return; } if (Array.isArray(cur.ids) && !cur.ids.length) { t.objectStore('colls').delete(id); out = 'gone'; } else out = 'kept'; }; }; if (gen === undefined) write(); else { const q = t.objectStore('kv').get('indexGen'); q.onsuccess = () => { const cur = q.result == null ? null : q.result; if (cur === gen) write(); else if (gen === null && cur !== null) out = 'unjudged'; }; } t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); },
   // The batch delete, with the generation carried inside its transaction
   // when one is given (R11-DS2): the same tri-state law as put/del — the
   // token is read in the deleting breath, so a clear committing between a
@@ -2556,10 +2573,17 @@ async function saveCollDialog(preIds) {
   // membership that landed. If the store holds none of the named photos any
   // more, the birth contract above is honoured after all: the emptied shell
   // the write landed is taken back under the same generation discipline, and
-  // no collection is created.
+  // no collection is created. The take-back is conditional (R11-DS3): the
+  // shell dies only if it is still empty at the deleting moment — a member
+  // another tab landed in the breath makes the collection stand, and this
+  // dialog adopts the store's record and speaks the Saved word after all.
+  // And a take-back whose delete fails is never swallowed under the
+  // not-created word (R11-S2): it is logged, the empty collection is
+  // adopted (the store holds it; memory does not deny the store), and the
+  // word reports that it stands.
   let landed; try { landed = typeof DB.putCollIfLive === 'function' ? await DB.putCollIfLive(c, typeof Indexer !== 'undefined' ? Indexer.gen : undefined) : null; if (landed === 'unjudged') landed = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.putCollIfLive(c, Indexer.gen); if (landed === null) { let cw = await DB.put('colls', c.id, c, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (cw === 'unjudged') cw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.put('colls', c.id, c, Indexer.gen); landed = (cw === false || cw === 'unjudged') ? cw : c; } } catch (e) { try { Log.add('ERR', 'collection not saved', e.message); } catch {} toast(`That collection didn't save (${e.message}). Nothing was saved.`, 6000); return; } // the write carries the generation inside its own transaction (R9-DS2): an erase landing between the ask above and the write is seen by the write itself
   if (landed === false || landed === 'unjudged') { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
-  if (landed.type === 'set' && !landed.ids.length) { try { let dw = await DB.del('colls', c.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (dw === 'unjudged') dw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.del('colls', c.id, Indexer.gen); if (dw === false || dw === 'unjudged') { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } } catch {} toast('Those photos are no longer in Iris — the collection was not created.'); return; }
+  if (landed.type === 'set' && !landed.ids.length) { let dw; try { if (typeof DB.delCollIfEmpty === 'function') { dw = await DB.delCollIfEmpty(c.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (dw === 'unjudged') dw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.delCollIfEmpty(c.id, Indexer.gen); } else { let fw = await DB.del('colls', c.id, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (fw === 'unjudged') fw = (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) ? false : await DB.del('colls', c.id, Indexer.gen); dw = fw === true ? 'gone' : fw; } } catch (e) { try { Log.add('ERR', 'collection take-back failed', e.message); } catch {} L.colls.set(c.id, landed); renderSearchChips(); toast('Those photos are no longer in Iris — but the empty collection was created, and Iris couldn’t remove it.', 6000); return; } if (dw === false || dw === 'unjudged') { toast('That collection was not saved — the index was erased in another tab. Reload Iris to see the current index.', 6000); if (typeof indexGone === 'function') indexGone(); return; } if (dw === 'kept') { let standing = null; try { standing = await DB.get('colls', c.id); } catch {} if (standing) landed = standing; else { toast('Those photos are no longer in Iris — the collection was not created.'); return; } } else { toast('Those photos are no longer in Iris — the collection was not created.'); return; } }
   L.colls.set(c.id, landed); renderSearchChips(); toast(`Saved “${name}”` + (landed.type === 'smart' ? '. It updates itself as you add photos.' : '.'));
 }
 async function addToColl(ids) {
@@ -3358,11 +3382,23 @@ async function ensureAI() {
   // in the dead tab before the run's own fence refused it. No frame is
   // offered and no load is spent in a dead world; every caller takes its
   // ordinary AI-unavailable path instead.
+  // The refusal is re-asked after EVERY await (R11-I1): the head check
+  // alone was straddled by this function's own cached() await — a caller
+  // parked there when the telling landed resumed with the check already
+  // behind it, and the frame opened over the sheet and its Download spent
+  // the load anyway. So each outward act is preceded by a fresh ask: the
+  // frame, the spend, the failure word in the catch, and the true the
+  // callers proceed on. A completion that crosses the telling completes
+  // nothing.
   if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return false;
   if (AI.state === 'ok') return true;
   const cached = await AI.cached();
+  if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return false;
   if (!cached && !(await confirm2('Download the AI?', `Iris needs Google’s EmbeddingGemma 2 model, about ${MODEL_MB} MB, once. Use Wi‑Fi. After that it works offline.`, 'Download'))) return false;
-  try { await AI.load(); return true; } catch (e) { toast('AI failed to start: ' + e.message, 5000); UI.renderIndex(); return false; }
+  if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return false;
+  try { await AI.load(); } catch (e) { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return false; toast('AI failed to start: ' + e.message, 5000); UI.renderIndex(); return false; }
+  if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return false;
+  return true;
 }
 
 let cur = 'search';
@@ -3409,8 +3445,11 @@ if (NATIVE) addEventListener('irisnative-resume', async () => { if (cur === 'lib
 // the telling starts nothing, and a download already in flight when the
 // telling lands does not complete the flow — no iris-ob mark, no askFolder
 // invitation over the recovery sheet. The download itself is a cache write
-// and harms nothing; it is there, ready, after the reload.
-$('#obGo').onclick = async () => { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; $('#obGo').disabled = true; try { await AI.load(); if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
+// and harms nothing; it is there, ready, after the reload. Its catch
+// carries the same guard (R11-S1), as #fModel's catch does: a load
+// rejecting past the telling neither re-arms this button nor speaks its
+// failure word over the sheet.
+$('#obGo').onclick = async () => { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; $('#obGo').disabled = true; try { await AI.load(); if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; localStorage.setItem('iris-ob', '1'); $('#onboard').classList.remove('on'); askFolder(); } catch (e) { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; $('#obGo').disabled = false; $('#obGo').textContent = 'Try again'; toast('Couldn’t start the AI (' + VER + '): ' + e.message, 6000); } };
 function askFolder() {
   Modal.open(h('div', {}, h('h2', {}, '✦ The AI is ready'), h('p', { class: 'sub' }, 'Now pick your photos. Choose one parent folder like DCIM or Pictures, then tap Allow when asked.'),
     h('div', { class: 'acts' }, h('button', { class: 'btn pri', onclick: () => { Modal.close(); Folders.add(); } }, 'Pick a folder'))));
