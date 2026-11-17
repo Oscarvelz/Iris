@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.76';
+const VER = 'Iris 2.77';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1291,12 +1291,12 @@ const Prep = {
   // Worker pool. HEIC decoding (libheif WASM) grows each worker's memory and it never shrinks, so a worker is
   // recycled after a few HEIC photos, and a crashed worker is replaced instead of giving up on workers for good.
   pool: [], ok: true, seq: 0, rr: 0, crashes: 0, lastErr: '', n: 0, TIMEOUT: Symbol('prep-timeout'),
-  heifSilent: 0, heifDead: false, // the libheif circuit breaker (R5-PS1): consecutive HEIC jobs whose worker never answered at all — the signature of a thread parked inside the worker's synchronous libheif import, not of a slow photo
+  heifSilent: 0, heifDead: false, // the libheif circuit breaker (R5-PS1): consecutive HEIC jobs whose worker did not answer within budget. Silence cannot tell a thread parked inside the worker's synchronous libheif import from a merely slow photo (R2-P7), so the breaker records the silence and claims no cause (R6-P5)
   isHeif(f) { return /\.(heic|heif)$/i.test(f?.name || '') || /hei[cf]/i.test(f?.type || ''); },
   init() { if (this.pool.length || !this.ok) return; try { this.n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < this.n; k++) this.spawn(k); } catch { this.ok = false; } },
   spawn(k) {
     const w = new Worker('prep-worker.js'); w.jobs = new Map(); w.heavy = 0; w.retire = false;
-    w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p && p.heif) this.heifSilent = 0; if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
+    w.onmessage = ({ data }) => { if (data.err) this.lastErr = data.err; w.heavy += data.heavy || 0; const p = w.jobs.get(data.id); if (p && p.heif) { this.heifSilent = 0; if (this.heifDead) { this.heifDead = false; Log.add('warn', 'the HEIC decoder library answered again — HEIC photos are no longer paused', 'libheif'); } } if (p) { w.jobs.delete(data.id); clearTimeout(p.t); p.res(data.p); } if (w.heavy >= 12) w.retire = true; if (w.retire && !w.jobs.size) this.replace(k, w); };
     w.onerror = (e) => { e.preventDefault?.(); this.crash(k, w, e.message || 'out of memory'); };
     this.pool[k] = w;
   },
@@ -1310,10 +1310,13 @@ const Prep = {
   send(msg, ms = 90000) {
     if (!this.pool.length) return Promise.resolve(undefined);
     // The circuit breaker's gate (R5-PS1): once the class is learned, no fresh
-    // worker is fed to the silent import again this session — a HEIC job resolves
-    // exactly as a crashed one does, instantly, and its caller lands on the honest
-    // wording in run(). Other photos are untouched: the pool stays healthy for
-    // everything that is not HEIC.
+    // worker is fed to the unanswering library again this session — a HEIC job
+    // resolves exactly as a crashed one does, instantly, and its caller lands on
+    // the honest wording in run(). Other photos are untouched: the pool stays
+    // healthy for everything that is not HEIC. The gate lifts early only on
+    // evidence: a HEIC job posted before the trip that still answers proves the
+    // library is responsive again, and the message handler revives the path
+    // (R6-P5).
     if (this.heifDead && this.isHeif(msg.file)) return Promise.resolve(undefined);
     let k = this.rr++ % this.pool.length;
     if (this.pool[k].retire) { const j = this.pool.findIndex((w) => !w.retire); if (j >= 0) k = j; } // a retiring worker takes no new jobs
@@ -1327,21 +1330,23 @@ const Prep = {
         // charged for a photo that never crashed, and the worker's late answer, if it
         // ever comes, finds no job waiting and is dropped.
         const p = w.jobs.get(id); if (!p) return; w.jobs.delete(id); w.retire = true;
-        // A HEIC job whose worker NEVER answered is a class, not a photo (R5-PS1):
-        // the worker thread is parked inside libheif's synchronous importScripts —
-        // the CDN accepted the connection and went silent — and terminating the
-        // worker frees the thread but teaches the pool nothing, so the next fresh
-        // worker walked into the same silent import and the next HEIC photo paid
+        // A HEIC job whose worker did not answer within budget is a class
+        // signal, not a photo verdict (R5-PS1): the known producer of total
+        // silence is a thread parked inside libheif's synchronous importScripts,
+        // but a merely slow photo is indistinguishable from it (R2-P7), so what
+        // is counted is the silence itself, never a cause (R6-P5). Terminating
+        // the worker frees the thread but teaches the pool nothing, so the next
+        // fresh worker walked into the same silence and the next HEIC photo paid
         // the full timeout ladder again, for a whole folder. Silent deaths are
         // counted — one vote per PHOTO, not per attempt: a photo's own retry is
         // the same witness, not a second one, and a single monstrous photo must
-        // never be allowed to name the library unreachable (the diagnosis claims
-        // only what was seen, R2-P7). Two photos in a row dying silently — any
-        // HEIC answer resets the count, because a worker that answers has the
-        // library — trip the breaker: the class is recorded, logged, and gated in
-        // send() for the rest of the session. A timeout is still not a crash —
-        // the crash counter keeps its own honest meaning.
-        if (p.heif) { const seen = this._heifCounted || (this._heifCounted = new WeakMap()); if (!seen.has(msg.file)) { seen.set(msg.file, 1); this.heifSilent++; if (this.heifSilent >= 2 && !this.heifDead) { this.heifDead = true; Log.add('ERR', 'HEIC photos are being skipped: the HEIC decoder library did not answer — the connection to it seems to be down', 'libheif'); } } }
+        // never be allowed to pause the library on its own. Two photos in a row
+        // dying silently — any HEIC answer resets the count, because a worker
+        // that answers has the library — trip the breaker: the class is
+        // recorded, logged, and gated in send() until the library answers again
+        // or the session ends. A timeout is still not a crash — the crash
+        // counter keeps its own honest meaning.
+        if (p.heif) { const seen = this._heifCounted || (this._heifCounted = new WeakMap()); if (!seen.has(msg.file)) { seen.set(msg.file, 1); this.heifSilent++; if (this.heifSilent >= 2 && !this.heifDead) { this.heifDead = true; Log.add('ERR', 'HEIC photos are being skipped: the HEIC decoder library did not answer in time, so HEIC decoding is paused — reopening Iris tries the library again', 'libheif'); } } }
         Log.add('warn', 'a prep job timed out; retiring its worker, other photos unaffected');
         if (!w.jobs.size) this.replace(k, w);
         res(this.TIMEOUT);
@@ -1365,9 +1370,10 @@ const Prep = {
     r = await this.send({ file: f2, ow, oh }, r === this.TIMEOUT ? 300000 : undefined); if (r !== undefined && r !== this.TIMEOUT) return r;
     // The diagnosis claims only what was actually seen: a crash only if the crash
     // counter moved during this photo, otherwise an honest timeout — and when the
-    // circuit breaker has tripped, the wording names the network's silence for
-    // what it is instead of blaming the photo's size (R5-PS1).
-    this.lastErr = this.heifDead && this.isHeif(file) ? 'the HEIC decoder library could not be reached, so HEIC photos are paused until Iris is reopened' : this.crashes > c0 ? 'the decoder crashed on this photo' : 'the decoder did not finish this photo in time — it may simply be very large';
+    // circuit breaker has tripped, the wording names the library's silence, the
+    // only thing actually seen, instead of blaming the photo's size or inventing
+    // a cause for the silence (R5-PS1, R6-P5).
+    this.lastErr = this.heifDead && this.isHeif(file) ? 'the HEIC decoder library did not answer in time, so HEIC photos are paused — reopening Iris tries the library again' : this.crashes > c0 ? 'the decoder crashed on this photo' : 'the decoder did not finish this photo in time — it may simply be very large';
     return /\.(heic|heif)$/i.test(file.name || '') ? null : prep(f2, ow, oh);
   },
 };
@@ -2319,7 +2325,11 @@ const Viewer = {
       // now races the same single-shot silence budget every other shell wait
       // lives by; a silent shell fails the upgrade honestly, says so in the log,
       // and the thumbnail already on screen simply stays the picture.
-      try { await (np && typeof NatSized !== 'undefined' ? NatSized.stall(im.decode()) : im.decode()); } catch (e) { if (np) { this.cache.delete(id); if (/went silent/.test(e?.message || '')) Log.add('warn', 'the shell did not answer in time — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } } c.im = im; return u; })();
+      // The timed-out entry is dropped by identity, not by id (R6-P4): if the
+      // LRU evicted this entry while its stall was still running and the photo
+      // was re-fetched and decoded into a fresh entry in the meantime, the
+      // stale catch must not evict the healthy copy it no longer owns.
+      try { await (np && typeof NatSized !== 'undefined' ? NatSized.stall(im.decode()) : im.decode()); } catch (e) { if (np) { if (this.cache.get(id) === c) this.cache.delete(id); if (/went silent/.test(e?.message || '')) Log.add('warn', 'the shell did not answer in time — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } } c.im = im; return u; })();
     this.cache.set(id, c); while (this.cache.size > 7) { const [k, o] = this.cache.entries().next().value; this.cache.delete(k); if (o.blob) o.p.then(() => o.url && URL.revokeObjectURL(o.url)); }
     return c.p;
   },
@@ -2844,6 +2854,19 @@ function indexGone() {
   bootRecovery(e);
 }
 function bootRecovery(e) {
+  const cls = e?.erased ? 'erased' : e?.blocked ? 'blocked' : e?.slow ? 'slow' : 'error';
+  // The blocked announcement is idempotent (R6-P3): while a blockage stands, the
+  // watchdog's retry opens announce onblocked again every 10 s, and each
+  // announcement used to rebuild this sheet and write another ERR line — an
+  // hour of blockage filled the capped log with one repeated line, evicting the
+  // session's real diagnostic trail, and each rebuild forgot a pending erase's
+  // waiting state. A repeat announcement carries no new information: the
+  // blocked wording is one fixed sentence, and an open that finally succeeds
+  // reloads the page, ending the episode and this page life with it. So while
+  // the blocked sheet stands, a further blocked announcement changes nothing —
+  // no rebuild, no log line, and the standing sheet, waiting note and disarmed
+  // button included, is left exactly as it stands.
+  if (cls === 'blocked' && bootRecovery.ov && bootRecovery.cls === 'blocked') return;
   Log.add('ERR', e?.erased ? 'the index was erased in another Iris tab — this tab is showing its copy from memory only' : e?.slow ? 'the index is taking a long time to open — the recovery surface is up while the open keeps trying' : 'boot stopped: the index would not open', e);
   // One recovery surface per page life (R5-P5): the singleton guard used to live in
   // the callers, unevenly — indexGone had one, boot's own paths were merely
@@ -2862,14 +2885,20 @@ function bootRecovery(e) {
     // parking the tab on a blank page for exactly as long as the other tab lives. So a
     // blocked deletion stays on this surface and says what it is waiting for; when the
     // other tab closes, the deletion completes and onsuccess reloads into a clean boot.
-    try { const r = indexedDB.deleteDatabase('iris'); r.onsuccess = reload; r.onerror = reload; r.onblocked = () => { waitNote.style.display = ''; eraseBtn.disabled = true; Log.add('warn', 'erase is waiting for another Iris tab to close'); }; } catch { reload(); }
+    try { const r = indexedDB.deleteDatabase('iris'); r.onsuccess = reload; r.onerror = reload; r.onblocked = () => { bootRecovery.erasePends = true; waitNote.style.display = ''; eraseBtn.disabled = true; Log.add('warn', 'erase is waiting for another Iris tab to close'); }; } catch { reload(); }
   };
   const ov = h('div', { class: 'ov on' }, h('div', { class: 'scrim' }), h('div', { class: 'sheet' },
     h('h2', {}, e?.erased ? 'Iris’s index was erased in another tab' : 'Iris can’t open its index'),
     h('p', { class: 'sub' }, e?.erased ? 'Another Iris tab erased the index, so this tab’s copy of your library now lives only in its memory — nothing here can be saved anymore, and the photos it shows are the ones that were there before the erase. Reload to start from the clean slate the erase left. Your photos themselves are not touched.' : blocked ? 'Another Iris tab is holding the index open, so this tab has to wait. Close the other Iris tab, then tap Try again. Your photos themselves are not touched.' : e?.slow ? 'Opening the index is taking far longer than usual. It may be slow storage, or something may be holding it up — Iris cannot tell which, so it keeps trying: if the index arrives, the app reloads itself. You can also tap Try again, or erase the index and let Iris rebuild it. Your photos themselves are not touched.' : 'The database where Iris keeps what it has learned about your photos would not open' + (e && e.name ? ' (' + e.name + ')' : '') + '. Your photos themselves are not touched. You can try again — or erase the index and let Iris rebuild it. Erasing removes the index, your collections and the folder links; the photos stay exactly where they are.'),
     waitNote,
     h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: reload }, 'Try again'), eraseBtn)));
-  ov.id = 'bootFail'; bootRecovery.ov = ov; document.body.append(ov);
+  ov.id = 'bootFail'; bootRecovery.ov = ov; bootRecovery.cls = cls; document.body.append(ov);
+  // A pending erase's waiting state survives a rebuild (R6-P3): when a sheet is
+  // legitimately replaced while an earlier sheet's erase still waits on the
+  // other tab — the slow sheet giving way to the blocked one is the reachable
+  // shape — the new sheet is born in the same state, note shown and button
+  // disarmed, never pristine over a deletion that still pends.
+  if (bootRecovery.erasePends && cls !== 'erased') { waitNote.style.display = ''; eraseBtn.disabled = true; }
   if (e?.erased) eraseBtn.remove(); // the index is already gone — there is nothing here to erase, only the reload makes sense
 }
 (async function boot() {
