@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.69';
+const VER = 'Iris 2.70';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -735,7 +735,11 @@ const Backup = {
       // Entries landed: new records arrived and the kept ones had their vectors
       // replaced under their existing ids. Any Junk result scored across this restore
       // mixes two worlds, so the swap discipline applies — invalidate, epoch too (R3-I5).
+      // Sugg hears the same event (R4-I3): its key is count:live, which a kept-only
+      // restore preserves exactly, so without this its categories would go on being
+      // scored from vectors the photos no longer have.
       if (n && typeof Junk !== 'undefined') { Junk.cache = null; Junk.epoch++; }
+      if (n && typeof Sugg !== 'undefined') Sugg.cache = null;
       let nc = 0, skippedC = 0, failedC = 0, badC = 0;
       // The collections tail is parsed defensively, entry by entry (R3-D4): a malformed
       // entry is skipped and counted — it must never throw into the outer catch and report
@@ -869,8 +873,9 @@ const L = {
   folders: new Map(),   // folderId -> {id,name,handle,lastScan}
   colls: new Map(),     // id -> collection
   session: new Map(),   // id -> File (for picked files this session)
+  ver: 0,               // world stamp: moves ONLY when a standing record's vector is replaced in place (add on an existing id) or the matrix is rebuilt — the two moves that silently rewrite the world under a long compute. Plain appends leave every captured row valid, so they never move it (R4-I2)
   add(m, vec) {
-    if (this.rows.has(m.id)) { this.meta.set(m.id, m); this.mat.set(vec, this.rows.get(m.id) * DIM); return; }
+    if (this.rows.has(m.id)) { this.meta.set(m.id, m); this.mat.set(vec, this.rows.get(m.id) * DIM); this.ver++; return; }
     const r = this.ids.length;
     if ((r + 1) * DIM > this.mat.length) { const n = new Float32Array(this.mat.length * 2); n.set(this.mat); this.mat = n; }
     this.mat.set(vec, r * DIM); this.ids.push(m.id); this.rows.set(m.id, r); this.meta.set(m.id, m);
@@ -878,7 +883,7 @@ const L = {
   rebuild() { // compact after removals
     const ids = this.ids.filter((id) => this.meta.has(id)); const n = new Float32Array(Math.max(1024, ids.length * 2) * DIM);
     ids.forEach((id, i) => n.set(this.mat.subarray(this.rows.get(id) * DIM, this.rows.get(id) * DIM + DIM), i * DIM));
-    this.mat = n; this.ids = ids; this.rows = new Map(ids.map((id, i) => [id, i]));
+    this.mat = n; this.ids = ids; this.rows = new Map(ids.map((id, i) => [id, i])); this.ver++;
   },
   vec(id) { const r = this.rows.get(id); return this.mat.subarray(r * DIM, r * DIM + DIM); },
   get count() { return this.ids.length; },
@@ -1673,16 +1678,31 @@ const Dups = {
   thr: .94, groups: null, dismissed: new Set(JSON.parse(localStorage.getItem('iris-dismissed') || '[]')),
   quality(m, maxSharp) { const s = Math.min(1, Math.log1p(m.sharp) / Math.log1p(maxSharp || 1)); const ex = 1 - Math.abs(m.bright - 125) / 125; const res = Math.min(1, (m.w * m.h) / 12e6); return s * .6 + ex * .25 + res * .15; },
   async find() {
-    const ids = L.live().sort((a, b) => L.meta.get(a).mtime - L.meta.get(b).mtime); const n = ids.length; const par = ids.map((_, i) => i);
-    const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; }; const u = (a, b) => { a = f(a); b = f(b); if (a !== b) par[b] = a; };
-    const W = 40, M = L.mat, rows = ids.map((id) => L.rows.get(id) * DIM);
-    for (let i = 0; i < n; i++) { for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); } if (i % 400 === 399) await sleep(0); }
-    const byHash = new Map(); ids.forEach((id, i) => { const d = L.meta.get(id).dh; if (!d) return; if (byHash.has(d)) u(byHash.get(d), i); else byHash.set(d, i); });
-    const gm = new Map(); ids.forEach((id, i) => { const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
-    let maxSharp = 1; for (const id of ids) maxSharp = Math.max(maxSharp, L.meta.get(id).sharp);
-    this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|'), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id).size || 0), 0) }; })
-      .filter((g) => !this.dismissed.has(g.key) && !this.dismissed.has(g.key.slice(0, 300))).sort((a, b) => b.ids.length - a.ids.length);
-    return this.groups;
+    // The world guard Junk's compute got in R3-I5, for the other long compute (R4-I2):
+    // find snapshots the matrix rows once, then yields every 400 photos — and an
+    // adoption swap or a restore landing at a yield rewrites the world mid-computation
+    // (a rebuild shifts every row under the snapshot; a kept restore replaces a
+    // photo's vector in place). Each pass is scored against L.ver, the stamp that
+    // moves on exactly those two events: a pass that spanned a move is discarded and
+    // recomputed in the world as it now stands, so a stored group is only ever scored
+    // from ONE world — never welded from two — and the record reads below are
+    // guarded besides, so a record a swap took can never throw here. A pass over
+    // 400 photos or fewer has no yield and cannot be interrupted at all.
+    for (;;) {
+      const v0 = L.ver;
+      const ids = L.live().sort((a, b) => L.meta.get(a).mtime - L.meta.get(b).mtime); const n = ids.length; const par = ids.map((_, i) => i);
+      const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; }; const u = (a, b) => { a = f(a); b = f(b); if (a !== b) par[b] = a; };
+      const W = 40, M = L.mat, rows = ids.map((id) => L.rows.get(id) * DIM);
+      let moved = false;
+      for (let i = 0; i < n; i++) { for (let j = i + 1; j < Math.min(n, i + W); j++) { let s = 0; const a = rows[i], b = rows[j]; for (let k = 0; k < DIM; k++) s += M[a + k] * M[b + k]; if (s >= this.thr) u(i, j); } if (i % 400 === 399) { await sleep(0); if (L.ver !== v0) { moved = true; break; } } }
+      if (moved) continue;
+      const byHash = new Map(); ids.forEach((id, i) => { const d = L.meta.get(id)?.dh; if (!d) return; if (byHash.has(d)) u(byHash.get(d), i); else byHash.set(d, i); });
+      const gm = new Map(); ids.forEach((id, i) => { if (!L.meta.has(id)) return; const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
+      let maxSharp = 1; for (const id of ids) maxSharp = Math.max(maxSharp, L.meta.get(id)?.sharp || 0);
+      this.groups = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|'), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id)?.size || 0), 0) }; })
+        .filter((g) => !this.dismissed.has(g.key) && !this.dismissed.has(g.key.slice(0, 300))).sort((a, b) => b.ids.length - a.ids.length);
+      return this.groups;
+    }
   },
   dismiss(g) { this.dismissed.add(g.key); try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-25000))); } catch { try { localStorage.setItem('iris-dismissed', JSON.stringify([...this.dismissed].slice(-10000))); } catch {} } },
 };
@@ -1775,7 +1795,9 @@ async function renderColl() {
   const lastQ = SUGGEST[SUGGEST.length - 1][2]; const lastPrompt = lastQ[lastQ.length - 1];
   if (AI.state !== 'ok' && !(await DB.get('kv', 'q2:' + lastPrompt))) { if (AI.state === 'busy') { cards.append(h('div', { class: 'card' }, h('p', {}, 'The AI is warming up. Suggestions appear in a moment.'))); return; } cards.append(h('div', { class: 'card' }, h('p', {}, 'Load the AI to see suggestions.'), h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: async () => { if (await ensureAI()) renderColl(); } }, 'Load AI'))); return; }
   const sKey = L.count + ':' + L.live().length;
+  let shown = Sugg.cache;
   if (!Sugg.cache || Sugg.cache.n !== sKey) {
+    const v0 = L.ver; // the world this count starts from (R4-I3)
     const ids = L.live(); const total = ids.length;
     const counting = h('div', { class: 'card' }, h('p', {}, 'Counting your photos in every category…')); cards.append(counting);
     const cats = [];
@@ -1792,13 +1814,22 @@ async function renderColl() {
     const list = cats.map((c) => { const st = stats(c.sc); const srt = [...c.sc].sort((a, b) => a - b); const bg = stats(srt.slice(0, Math.max(10, Math.floor(srt.length * .7)))); const out = []; for (let i = 0; i < ids.length; i++) { const v = c.sc[i]; let second = -9; for (const o of cats) if (o !== c && o.sc[i] > second) second = o.sc[i]; for (const d of decoys) if (d[i] > second) second = d[i]; if (second > v) continue; const strong = (v - st.mean) / st.sd >= 2.2; const big = v > bg.mean + 4 * bg.sd && v - second >= .01; if (!strong && !big) continue; out.push({ id: ids[i], s: v }); } out.sort((a, b) => b.s - a.s); return { ic: c.ic, name: c.name, q: c.q, ids: out.map((r) => r.id) }; })
       .filter((c) => c.ids.length >= 3)
       .sort((a, b) => b.ids.length - a.ids.length);
-    Sugg.cache = { n: sKey, list, total };
+    const fresh = { n: sKey, list, total };
+    // Stored only if the world held for the whole count (R4-I3): an adoption swap
+    // landing mid-count nulls this cache, but the null is spent on an empty cache
+    // and the in-flight run would overwrite it with a two-worlds list — the
+    // candidate's old id a ghost in a category, the adopted photo under its new id
+    // missing — under a key that still matches (count and live count never move in
+    // a swap). Junk's discipline, same as its compute: the fresh count is still
+    // shown for this visit; it is simply never stored across a swap.
+    if (L.ver === v0) Sugg.cache = fresh;
+    shown = fresh;
     counting.remove();
   }
   if (tok !== RT_.coll) return;
-  const totalLib = Sugg.cache.total || L.live().length;
-  if (!Sugg.cache.list.length) cards.append(h('div', { class: 'card' }, h('p', {}, 'No category has enough photos yet to recommend. As Iris understands more of your library, your biggest categories will appear here.')));
-  for (const { ic, name, q, ids } of Sugg.cache.list) {
+  const totalLib = shown.total || L.live().length;
+  if (!shown.list.length) cards.append(h('div', { class: 'card' }, h('p', {}, 'No category has enough photos yet to recommend. As Iris understands more of your library, your biggest categories will appear here.')));
+  for (const { ic, name, q, ids } of shown.list) {
     const pct = totalLib ? Math.round(ids.length / totalLib * 1000) / 10 : 0;
     const mini = h('div', { class: 'mini' }); ids.slice(0, 4).forEach((id) => { const im = h('img', { alt: '' }); Thumbs.url(id).then((u) => im.src = u); mini.append(im); });
     cards.append(h('div', { class: 'card click', onclick: () => Modal.open(h('div', {}, h('h2', {}, ic + ' ' + name), h('p', { class: 'sub' }, `${fmtN(ids.length)} photos · ${pct}% of your library`), grid(ids, { path: true })), true) }, h('h3', {}, ic + ' ' + name), h('p', {}, `${fmtN(ids.length)} photos · ${pct}% of your library`), mini));
@@ -1948,9 +1979,13 @@ $('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.
 $('#vFull').onclick = async () => { const id = Viewer.list[Viewer.i]; const f = await Folders.fileFor(id, true); if (!f) return toast('Couldn’t open the original.'); if (await Viewer.showFile(f, id)) $('#vFull').classList.add('hide'); };
 $('#vLike').onclick = () => { const id = Viewer.list[Viewer.i]; if (!L.meta.get(id)) { Viewer.show(); return; } Viewer.close(); setImageQuery(id); };
 $('#vPlus').onclick = () => { const id = Viewer.list[Viewer.i]; if (!L.meta.get(id)) { Viewer.show(); return; } Viewer.close(); setImageQuery(id, true); };
-$('#vColl').onclick = () => addToColl([Viewer.list[Viewer.i]]);
+$('#vColl').onclick = () => { const id = Viewer.list[Viewer.i]; if (!L.meta.get(id)) { Viewer.show(); return; } addToColl([id]); };
 $('#vShare').onclick = () => shareIds([Viewer.list[Viewer.i]]);
-$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); if (!m) { Viewer.show(); return; } if (!(await setStatus([id], m.status === 'trash' ? null : 'trash'))) return; toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); Viewer.list = Viewer.list.filter((x) => x !== id); if (!Viewer.list.length) return Viewer.close(); if (Viewer.i >= Viewer.list.length) Viewer.i = Viewer.list.length - 1; Viewer.show(); };
+/* The bin's await leaves the arrows and swipes live, so the user may be looking at a
+   different photo when it lands: the completion then only repairs the index and
+   leaves their photo on screen — it never re-renders at the shifted index, which
+   used to jump the screen past the photo they had stepped to (R4-I6). */
+$('#vBin').onclick = async () => { const id = Viewer.list[Viewer.i]; const m = L.meta.get(id); if (!m) { Viewer.show(); return; } if (!(await setStatus([id], m.status === 'trash' ? null : 'trash'))) return; toast(m.status === 'trash' ? 'Moved to bin' : 'Restored'); $$(`.tile[data-id="${CSS.escape(id)}"]`).forEach((t) => t.classList.toggle('trash', m.status === 'trash')); const cur = Viewer.list[Viewer.i]; Viewer.list = Viewer.list.filter((x) => x !== id); if (!Viewer.list.length) return Viewer.close(); if (cur !== id) { const ni = Viewer.list.indexOf(cur); if (ni >= 0) { Viewer.i = ni; return; } } if (Viewer.i >= Viewer.list.length) Viewer.i = Viewer.list.length - 1; Viewer.show(); };
 let sx = null; $('#vPic').addEventListener('pointerdown', (e) => { sx = e.pointerType === 'touch' ? null : e.clientX; }); $('#vPic').addEventListener('pointerup', (e) => { if (sx != null && Math.abs(e.clientX - sx) > 60) Viewer.step(e.clientX < sx ? 1 : -1); sx = null; });
 /* Pinch to zoom, drag to pan, double-tap to zoom in/out; swipe changes photo only when not zoomed. */
 const Zoom = {
@@ -1976,7 +2011,12 @@ $('#vPic').addEventListener('touchend', (e) => { const g = Zoom.g; if (!g) retur
   if (Zoom.s > 1) { Zoom.clamp(); Zoom.apply(true); return; }
   const dx = c.clientX - g.sx, dy = c.clientY - g.sy; if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.3) Viewer.step(dx < 0 ? 1 : -1); });
 $('#vPic').addEventListener('touchcancel', () => { Zoom.g = null; if (Zoom.s > 1) { Zoom.clamp(); Zoom.apply(true); } });
-document.addEventListener('keydown', (e) => { if ($('#modal').classList.contains('on')) { if (e.key === 'Escape') Modal.close(true); return; } if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
+/* Modal first, as always — but Compare IS a modal, and its stepper used to be
+   unreachable by keyboard while it stood (R4-I5): arrows now reach it, and only
+   while its frame is the one being shown (live in the stack, and its stage still
+   in the document — a prompt or sheet opened over it disconnects the stage and
+   keeps the keys for itself). Escape and every other modal keep their order. */
+document.addEventListener('keydown', (e) => { if ($('#modal').classList.contains('on')) { if (e.key === 'Escape') { Modal.close(true); return; } if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && Compare.live && Compare.els?.stage?.isConnected) Compare.step(e.key === 'ArrowRight' ? 1 : -1); return; } if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
 
 /* ---------------- Compare (Clean · duplicate groups) ----------------
    Press-and-hold a photo in a duplicate group: the whole group opens big, one photo at a time in a
@@ -1993,9 +2033,9 @@ document.addEventListener('keydown', (e) => { if ($('#modal').classList.contains
    2.40 experiment — groups opening empty — was his correction overshot: he never minded Iris
    selecting; he minded not being able to overrule it.) */
 const Compare = {
-  g: null, marks: null, i: 0, updBin: null, row: null, els: null, hooks: null,
+  g: null, marks: null, i: 0, updBin: null, row: null, els: null, hooks: null, live: false, // live: this Compare is standing in the modal stack — set at open, cleared on every close path (its own buttons, the rescue, and the frame's onCancel for Escape/scrim/Back)
   open(g, startId, marks, updBin, row, hooks) {
-    this.g = g; this.marks = marks; this.updBin = updBin; this.row = row; this.hooks = hooks || null; this.i = Math.max(0, g.ids.indexOf(startId));
+    this.g = g; this.marks = marks; this.updBin = updBin; this.row = row; this.hooks = hooks || null; this.i = Math.max(0, g.ids.indexOf(startId)); this.live = true;
     const stage = h('img', { class: 'cmpImg', alt: '', onclick: () => this.verdict() });
     const cross = h('div', { class: 'cmpX' }, '✕');
     const prev = h('button', { class: 'cmpNav prev', onclick: () => this.step(-1) }, '‹');
@@ -2008,20 +2048,26 @@ const Compare = {
        preview Oscar could not take a ✕ off: 'ya no puedo quitar la selección y la X de estas fotos'.
        The arrows remain the way to look at a photo without touching its mark.) */
     g.ids.forEach((id, k) => { const b = h('button', { onclick: () => { this.i = k; this.verdict(); } }, h('img', { alt: '' }), id === g.best ? h('span', { class: 'bst' }, '★') : ''); Thumbs.url(id).then((u) => { if (u) b.firstChild.src = u; }); strip.append(b); });
-    const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); Modal.close(); } }, 'Keep');
+    const keepBtn = h('button', { class: 'btn', onclick: () => { this.hooks?.onKeep?.(); this.live = false; Modal.close(); } }, 'Keep');
     const cnt = h('b', { style: 'font-size:15px' }, '');
-    const remBtn = h('button', { class: 'btn danger', onclick: async () => { await this.hooks?.onRemove?.(); Modal.close(); } }, 'Remove');
+    const remBtn = h('button', { class: 'btn danger', onclick: async () => { await this.hooks?.onRemove?.(); this.live = false; Modal.close(); } }, 'Remove');
     const remWrap = h('span', { style: 'display:none;align-items:center;gap:8px' }, remBtn, cnt);
     this.els = { stage, stageWrap, info, strip, keepBtn, remWrap, remBtn, cnt, prev, next };
     Modal.open(h('div', {}, h('h2', {}, `${g.ids.length} similar — compare`), h('p', { class: 'sub' }, 'Iris marked its picks — grey with a ✕. Tap any photo, big or small, to change the pick. The last word is yours.'),
       stageWrap, info,
-      h('div', { class: 'bar' }, keepBtn, remWrap, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => Modal.close() }, 'Done')), strip), true);
+      h('div', { class: 'bar' }, keepBtn, remWrap, h('span', { class: 'sp' }), h('button', { class: 'btn', onclick: () => { this.live = false; Modal.close(); } }, 'Done')), strip), true, () => { this.live = false; });
     this.show();
   },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.g.ids.length) return; this.i = n; this.show(); },
   // The rescue's word, same discipline as the Viewer's: an announcement must never
   // be able to break the rescue itself.
   note(msg) { try { toast(msg, 3000); } catch {} },
+  // Marks name photos; a photo whose record has vanished can no longer be removed,
+  // so it stops counting the moment anyone looks (R4-I1). The pruning discipline
+  // reached Sel.set and the tuning sets in round 3 but never this set — and a ghost
+  // left standing as the only mark could dismiss the whole group under a false
+  // "1 removed", with nothing removed at all.
+  prune() { if (!this.marks) return; for (const id of [...this.marks]) if (!L.meta.has(id)) this.marks.delete(id); },
   /* Tapping the stage photo flips ITS mark in place — grey and ✕ come and go on the photo he means,
      and the view does not move. Marking is the only per-photo act; removing is the bar's Remove.
      If the current copy's record has vanished, the tap belongs to the rescue, not to a
@@ -2041,10 +2087,11 @@ const Compare = {
       // living copy, or close with a word (R3-I1).
       let j = -1; for (let k = this.i + 1; k < this.g.ids.length && j < 0; k++) if (L.meta.has(this.g.ids[k])) j = k;
       for (let k = this.i - 1; k >= 0 && j < 0; k--) if (L.meta.has(this.g.ids[k])) j = k;
-      if (j < 0) { Modal.close(); this.note('That photo is no longer in Iris.'); return; }
+      if (j < 0) { this.live = false; Modal.close(); this.note('That photo is no longer in Iris.'); return; }
       this.i = j; id = this.g.ids[j]; m = L.meta.get(id);
       this.note('That photo is no longer in Iris — showing the nearest copy that is.');
     }
+    const marksBefore = this.marks.size; this.prune(); if (this.marks.size !== marksBefore) this.updBin?.(); // the bar, the strip and the row behind all count living marks only (R4-I1)
     const { stage, stageWrap, info, strip, keepBtn, remWrap, cnt, prev, next } = this.els;
     stageWrap.classList.toggle('marked', this.marks.has(id));
     const t = await Thumbs.url(id); if (seq !== this._seq) return; stage.src = t;
@@ -2118,13 +2165,13 @@ async function renderClean() {
          Header action swaps by state: no marks → 'Keep all' (everything stays); any mark → red
          'Remove' with the count beside it. */
       const marks = new Set(g.ids.slice(1)); const row = h('div', { class: 'row' });
-      const onRemove = async () => { if (!marks.size) return; const n = marks.size; if (!(await setStatus([...marks], 'trash'))) return; Dups.dismiss(g); gEl.style.opacity = .3; setTimeout(() => gEl.remove(), 250); toast(`${n} removed`); };
+      const onRemove = async () => { for (const id of [...marks]) if (typeof L !== 'undefined' && !L.meta.has(id)) marks.delete(id); if (!marks.size) { toast('Those copies are no longer in Iris — nothing was removed.'); return; } const n = marks.size; if (!(await setStatus([...marks], 'trash'))) return; Dups.dismiss(g); gEl.style.opacity = .3; setTimeout(() => gEl.remove(), 250); toast(`${n} removed`); }; // marks are pruned first (R4-I1): Remove acts on living records only, and a group whose marks all vanished is NOT dismissed under a false count — nothing was removed, and the toast says so
       const onKeep = () => { Dups.dismiss(g); gEl.remove(); toast('All kept — Iris won’t show this group again.', 3000); };
       const cnt = h('b', { style: 'font-size:14px' }, '');
       const binBtn = h('button', { class: 'btn sm danger', onclick: onRemove }, 'Remove');
       const remWrap = h('span', { style: 'display:none;align-items:center;gap:6px' }, binBtn, cnt);
       const keepBtn = h('button', { class: 'btn sm', onclick: onKeep }, 'Keep all');
-      const updBin = () => { cnt.textContent = String(marks.size); keepBtn.style.display = marks.size ? 'none' : ''; remWrap.style.display = marks.size ? 'inline-flex' : 'none'; }; updBin();
+      const updBin = () => { for (const id of [...marks]) if (!L.meta.has(id)) marks.delete(id); cnt.textContent = String(marks.size); keepBtn.style.display = marks.size ? 'none' : ''; remWrap.style.display = marks.size ? 'inline-flex' : 'none'; }; updBin(); // the row's bar counts living marks only, like Compare's (R4-I1)
       const gEl = h('div', { class: 'group' }, h('div', { class: 'gh' }, h('span', {}, `${g.ids.length} similar · ${new Date(L.meta.get(g.best).mtime).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` + ((n) => n > 1 ? ` · ${n} folders` : '')(new Set(g.ids.map((x) => locParts(x).join('/'))).size)), h('span', { class: 'sp' }),
         keepBtn, remWrap), row);
       g.ids.forEach((id, i) => { const t = tile(id, i, g.ids, { locFull: true, badge: (x) => (x === g.best ? { text: '★ Best', cls: 'best' } : null), onTap: (x, el) => { if (marks.has(x)) marks.delete(x); else marks.add(x); el.classList.toggle('mark', marks.has(x)); updBin(); }, onLong: (x) => Compare.open(g, x, marks, updBin, row, { onRemove, onKeep }) }); if (marks.has(id)) t.classList.add('mark'); row.append(t); });
@@ -2255,7 +2302,7 @@ const UI = {
   newChip() { if (cur !== 'search' || S.q) return; const shown = $('#sres .grid')?._ids?.length || 0; const n = L.live().length - shown; let c = $('#newChip'); if (n <= 0) { c?.remove(); return; } if (!c) { c = h('button', { id: 'newChip', class: 'chip on', onclick: () => { c.remove(); renderSearch(); $('#main').scrollTop = 0; } }); $('#sbar').append(h('span', { class: 'sp' }), c); } c.textContent = `↻ ${fmtN(n)} new`; },
   binCount() { const n = binIds().length; $('#binN').textContent = n ? (n > 999 ? '999+' : String(n)) : ''; },
   refreshLight() { cancelTilePresses(); if (cur === 'search' && !S.q && !$('#viewer').classList.contains('on') && $('#main').scrollTop < 200) renderSearch(); this.binCount(); },
-  refreshAll() { cancelTilePresses(); Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean') renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); if (cur === 'bin') renderBin(); this.binCount(); },
+  refreshAll() { cancelTilePresses(); Dups.groups = null; renderSearchChips(); renderPickSrc(); if (cur === 'search') S.q ? runSearch() : renderSearch(); if (cur === 'clean' && !Compare.live) renderClean(); if (cur === 'coll') renderColl(); if (cur === 'lib') renderLib(); if (cur === 'bin') renderBin(); this.binCount(); }, // Clean is not rebuilt under a standing Compare (R4-I7): a rebuild would hand every row a FRESH marks set while Compare edits the old one — its verdicts silently discarded, the visible row still promising the pre-marks. The deferred rebuild lands on the next navigation or refresh, with Compare's set still the row's own.
 };
 UI.renderLib = renderLib;
 async function ensureAI() {
