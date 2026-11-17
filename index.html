@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.98';
+const VER = 'Iris 2.99';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1156,8 +1156,8 @@ const Backup = {
       // the arming between them to a restore that finished its entries.
       if (unknown) { stopUnknown(); return; }
       if (aborted) { // Erase landed while this restore ran: take back every write that outlived the clear, arm nothing, and say what happened (R4-D2) — and the discoverer stands the foreground down itself (R12-I3): every other discoverer of an erase (the scan, setStatus, Folders, saveCollDialog) calls indexGone() at its own discovery; a restore that simply walked away left the foreground armed in a dead world until the user's next fenced deed tripped a fence there
-        try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch {} // the take-back's acts are independent here too (R13-DS2), and every deletion judges content — only this restore's own writes are taken back, never a fresh world's same-id rebirth (R13-DS1)
-        for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch {} L.colls.delete(id); }
+        try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch (e) { Log.add('ERR', 'restore stopped but could not take back the photos it had restored', e?.message || String(e)); } // the take-back's acts are independent here too (R13-DS2), and every deletion judges content — only this restore's own writes are taken back, never a fresh world's same-id rebirth (R13-DS1); a take-back that fails wholesale is logged by name, as the disarm is (R14-DS2), and the content judgement's declared bound — a write the fresh world has touched is spared — is stated at the final-ask retraction (R14-DS1)
+        for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch (e) { Log.add('ERR', 'restore stopped but could not take back a collection it had restored', id + ': ' + (e?.message || String(e))); } L.colls.delete(id); }
         Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length);
         toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
       // Dismissed groups merge in as a union and persist, so they stay dismissed on this
@@ -1192,9 +1192,21 @@ const Backup = {
         // by name rather than swallowed behind it. The take-back, in
         // turn, deletes only what is still this restore's own write
         // (R13-DS1, DB.removeItemsIfWritten / DB.delCollIfWritten).
+        // That judgement's bound is declared, not hidden (R14-DS1): it
+        // is exact content, so a write the fresh world has TOUCHED in
+        // the breath — a record's status flipped by its own tab, a
+        // collection renamed — no longer matches its snapshot and is
+        // spared, deliberately. The only test that would still catch
+        // it, the fromBak stamp, cannot tell this restore's write from
+        // the fresh world's own rebirth or re-restore wearing the same
+        // stamp, and taking back the fresh world's own data is the
+        // worse error by far. The abort word below is bounded by that
+        // sparing — a touched write can stand — and by the acts' own
+        // failures, which are logged by name (R14-DS2): the word never
+        // stands alone over an unrecorded failure.
         if (n || nc) { try { await DB.put('kv', 'adoptPool', false); } catch (e) { Log.add('ERR', 'restore stopped but could not disarm the adoption window it armed', e?.message || String(e)); } }
-        try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch {}
-        for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch {} L.colls.delete(id); }
+        try { if (wrote.length) { if (typeof DB.removeItemsIfWritten === 'function') await DB.removeItemsIfWritten([...written]); else if (DB.removeItems) await DB.removeItems(wrote); } } catch (e) { Log.add('ERR', 'restore stopped but could not take back the photos it had restored', e?.message || String(e)); }
+        for (const id of wroteC) { try { if (typeof DB.delCollIfWritten === 'function') await DB.delCollIfWritten(id, writtenC.get(id)); else await DB.del('colls', id); } catch (e) { Log.add('ERR', 'restore stopped but could not take back a collection it had restored', id + ': ' + (e?.message || String(e))); } L.colls.delete(id); }
         Log.add('warn', 'restore stopped: the index was erased while it ran', wrote.length + wroteC.length); toast('The restore stopped — the index was erased while it was running, so nothing from this backup survived the erase. You can restore it again if you like.', 6000); if (typeof indexGone === 'function') indexGone(); return; }
       if (gone) Log.add('info', 'restore skipped photos already matched into this device', gone);
       if (badNames.length) Log.add('ERR', 'restore skipped damaged backup entries', badNames.join(', '));
