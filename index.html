@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.82';
+const VER = 'Iris 2.83';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1045,7 +1045,7 @@ const Backup = {
 const ThumbFix = {
   q: [], busy: false, missing: null, halted: false, // halted: this tab has been told its index is gone (indexGone / eraseIndex set it) — the fixer stops like the Indexer and the Work service do (R6-D6)
   add(id, getFile) { if (getFile && !this.halted) { this.q.push({ id, getFile }); this.run(); } },
-  async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile()); if (this.halted) break; // told while this decode was parked: the thumbnail is never written into a store this tab no longer owns (R6-D6)
+  async run() { if (this.busy) return; this.busy = true; let any = false; while (this.q.length) { const { id, getFile } = this.q.shift(); try { const p = await Prep.run(await getFile(), id); if (this.halted) break; // told while this decode was parked: the thumbnail is never written into a store this tab no longer owns (R6-D6)
         if (typeof Indexer !== 'undefined' && typeof Indexer.genMoved === 'function' && await Indexer.genMoved()) { this.halted = true; this.q.length = 0; Log.add('warn', 'thumbnail fixing stopped: the index was erased in another tab'); break; } // the generation fence at this write too — and the write itself is a single transaction with its existence + generation reads (DB.putThumbIfLive), so not even an erase landing in the old read→write gap can leave an orphan thumbnail in a cleared store (R7-DS1)
         if (p?.thumb) { const wrote = await DB.putThumbIfLive(id, p.thumb, typeof Indexer !== 'undefined' ? Indexer.gen : undefined); if (!wrote) continue; any = true; } } catch (e) { let nm = id; try { nm = L.meta.get(id)?.name || id; } catch {} Log.add('warn', 'a thumbnail was not fixed or saved — the photo will be offered again at the next folder check', nm, e?.message || String(e)); if (this.missing) this.missing.add(id); } } this.busy = false; if (any) UI.refreshLight(); },
   async buildMissing() { if (this.missing) return; try { const keys = await new Promise((res, rej) => { const q = DB.tx(['thumbs']).objectStore('thumbs').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); const have = new Set(keys); this.missing = new Set(L.ids.filter((id) => !have.has(id))); } catch { this.missing = new Set(); } },
@@ -1337,12 +1337,22 @@ const Prep = {
   pool: [], ok: true, seq: 0, rr: 0, crashes: 0, lastErr: '', n: 0, TIMEOUT: Symbol('prep-timeout'),
   heifSilent: 0, heifDead: false, // the libheif circuit breaker (R5-PS1): consecutive HEIC jobs whose worker did not answer within budget. Silence cannot tell a thread parked inside the worker's synchronous libheif import from a merely slow photo (R2-P7), so the breaker records the silence and claims no cause (R6-P5)
   isHeif(f) { return /\.(heic|heif)$/i.test(f?.name || '') || /hei[cf]/i.test(f?.type || ''); },
-  // A photo's durable identity at this boundary (R7-P1): every door — indexer,
-  // thumb fixer, viewer — mints a fresh File object for the same photo, but the
-  // name, size and mtime come from the disk and agree across all of them.
-  // Callers compute the key from the ORIGINAL file, before NatSized.swap
-  // replaces it with a resized copy whose size differs per door.
-  keyOf(f) { return f ? (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0) : ''; },
+  // A photo's durable identity at this boundary. Every door — indexer, thumb
+  // fixer, viewer — holds the photo's RECORD id, and that is the identity the
+  // vote ledger keys on when a door supplies it (R8-P1): the same record
+  // through any door is one witness, and two different records are two
+  // witnesses even when their files share a name, size and mtime — the D-6
+  // triple collision, for which the pick door itself mints #2/#3 record ids.
+  // A File alone cannot tell triple-twins apart, so the name|size|mtime key
+  // below survives only as the fallback for a caller with no record (none in
+  // the app today). Object identity was the first key and failed the other
+  // way: every door mints a fresh File for the same photo, so one photo
+  // counted as two witnesses (R7-P1). Callers compute the key from the
+  // ORIGINAL file, before NatSized.swap replaces it with a resized copy
+  // whose size — and on the native path whose very bytes — differ per door;
+  // a record id never depends on the file at all, which is what makes it
+  // stable across the web and native doors alike.
+  keyOf(f, id) { return id ? 'id:' + id : f ? (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0) : ''; },
   init() { if (this.pool.length || !this.ok) return; try { this.n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 4) >> 2)); for (let k = 0; k < this.n; k++) this.spawn(k); } catch { this.ok = false; } },
   spawn(k) {
     const w = new Worker('prep-worker.js'); w.jobs = new Map(); w.heavy = 0; w.retire = false;
@@ -1401,13 +1411,14 @@ const Prep = {
         // counted — one vote per PHOTO, not per attempt: a photo's own retry is
         // the same witness, not a second one, and a single monstrous photo must
         // never be allowed to pause the library on its own. The ledger keys on
-        // the photo (name, size and mtime of the file the caller handed in,
-        // taken before any swap), because every door of the app mints a fresh
-        // File object for the same photo and an object-keyed ledger counted
-        // one photo as two witnesses (R7-P1). Two photos in a row dying
-        // silently — an answer the worker attributes to the library itself
-        // resets the count, because only that answer proves the library
-        // responsive (R7-P2) — trip the breaker: the class is
+        // the photo's record id, which every door supplies (keyOf): an
+        // object-keyed ledger counted one photo as two witnesses, because
+        // every door mints a fresh File for the same photo (R7-P1), and the
+        // file's name|size|mtime — the first cure's key — counts two different
+        // photos as one witness whenever they share that triple (R8-P1). Two
+        // photos in a row dying silently — an answer the worker attributes to
+        // the library itself resets the count, because only that answer proves
+        // the library responsive (R7-P2) — trip the breaker: the class is
         // recorded, logged, and gated in send() until the library answers again
         // or the session ends. A timeout is still not a crash — the crash
         // counter keeps its own honest meaning.
@@ -1420,10 +1431,10 @@ const Prep = {
       w.postMessage({ ...msg, id });
     });
   },
-  async big(file) { this.init(); if (!this.ok || !this.pool.length) return null; const key = this.keyOf(file); const sw = await NatSized.swap(file, 2048, false); const f = sw?.file || file; let r = await this.send({ op: 'big', file: f, key }); if (r !== undefined && r !== this.TIMEOUT) return r; r = await this.send({ op: 'big', file: f, key }, r === this.TIMEOUT ? 300000 : undefined); return r === undefined || r === this.TIMEOUT ? null : r; }, // the same retry policy as run() (R3-P4): a crashed job earns the same fresh-worker second chance as a timed-out one — only the retry's budget differs (the long one after a timeout, the normal one after a crash). big() used to retry timeouts only, abandoning a viewer photo whose worker died once although the pool had already replaced it
-  async run(file) {
+  async big(file, id) { this.init(); if (!this.ok || !this.pool.length) return null; const key = this.keyOf(file, id); const sw = await NatSized.swap(file, 2048, false); const f = sw?.file || file; let r = await this.send({ op: 'big', file: f, key }); if (r !== undefined && r !== this.TIMEOUT) return r; r = await this.send({ op: 'big', file: f, key }, r === this.TIMEOUT ? 300000 : undefined); return r === undefined || r === this.TIMEOUT ? null : r; }, // the same retry policy as run() (R3-P4): a crashed job earns the same fresh-worker second chance as a timed-out one — only the retry's budget differs (the long one after a timeout, the normal one after a crash). big() used to retry timeouts only, abandoning a viewer photo whose worker died once although the pool had already replaced it
+  async run(file, id) {
     this.init(); this.lastErr = '';
-    const key = this.keyOf(file); const sw = await NatSized.swap(file, 640); const f2 = sw?.file || file, ow = sw?.ow || 0, oh = sw?.oh || 0;
+    const key = this.keyOf(file, id); const sw = await NatSized.swap(file, 640); const f2 = sw?.file || file, ow = sw?.ow || 0, oh = sw?.oh || 0;
     if (!this.ok || !this.pool.length) return prep(f2, ow, oh);
     const c0 = this.crashes;
     let r = await this.send({ file: f2, ow, oh, key }); if (r !== undefined && r !== this.TIMEOUT) return r;
@@ -1918,7 +1929,7 @@ const Indexer = {
   // job has left the queue, so Erase's queue-emptying cannot reach it, and the loop used
   // to stamp it at in-hand time — after Erase's bump — so its epoch check passed by
   // construction and its save landed in the cleared index.
-  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); j.ep = this.epoch; return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file); if (!j.p) j.err = Prep.lastErr || 'decode failed'; } catch (e) { j.err = e.name + ': ' + e.message; j.p = null; } return j; })(); },
+  prepNext() { const j = this.queue.shift(); if (!j) return Promise.resolve(null); j.ep = this.epoch; return (async () => { try { const file = await j.getFile(); j.file = file; j.p = await Prep.run(file, j.id); if (!j.p) j.err = Prep.lastErr || 'decode failed'; } catch (e) { j.err = e.name + ': ' + e.message; j.p = null; } return j; })(); },
   // A tab that never learned a token (gen === null — boot's claim was refused,
   // R8-D1) cannot judge the first token that later appears by comparison alone:
   // null is the ABSENCE of a token, so any token differs from it, and the plain
@@ -2486,14 +2497,17 @@ const Viewer = {
     // A failure to FETCH the original (the folder momentarily unreachable) is a
     // blink, not a verdict: the entry is dropped by identity, like the native
     // stall's, so the next visit asks again instead of serving the cached null
-    // all session (R7-PS1). A failed DECODE is a verdict about the photo and
-    // keeps its cached null — stepping back onto an undecodable HEIC must not
+    // all session (R7-PS1). The blink is logged, as the stall's failure is: a
+    // photo whose folder blinks on every visit leaves a word in Diagnostics on
+    // every visit, instead of failing in silence forever (R8-PS1). A failed
+    // DECODE is a verdict about the photo and keeps its cached null —
+    // stepping back onto an undecodable HEIC must not
     // re-pay the prep ladder on every visit; the #vFull button remains the
     // manual retry, through showFile.
     const c = { url: null, blob: false }; c.p = (async () => {
       let u = null; const np = this.fastNative() && this.natPath(id);
       if (np) u = NAT_URL.replace('/f?', '/v?') + encodeURIComponent(np) + '&w=' + Math.min(2560, Math.round(Math.max(innerWidth, innerHeight) * (devicePixelRatio || 1)));
-      else { const f = await Folders.fileFor(id, false); if (!f) { if (this.cache.get(id) === c) this.cache.delete(id); return null; } let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
+      else { const f = await Folders.fileFor(id, false); if (!f) { if (this.cache.get(id) === c) this.cache.delete(id); Log.add('warn', 'the original file could not be fetched — the full-quality copy was not loaded', L.meta.get(id)?.name || id); return null; } let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return null; } u = URL.createObjectURL(b); c.blob = true; }
       c.url = u; const im = new Image(); im.src = u;
       // The native /v load joins the shell's stall discipline (R5-P3): this path
       // builds the endpoint's URL itself and used to await the decode bare, so a
@@ -2542,7 +2556,7 @@ const Viewer = {
   // The #vFull handler awaits the original file before calling this, so whatever the
   // file type, the photo on screen must still be the one the file belongs to when it
   // lands: the index check the HEIF branch always had, now on every path (R3-I2).
-  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f); if (!b) return false; } if (this.list[this.i] !== id) return false; const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); $('#vImg').src = u; return true; },
+  async showFile(f, id) { let b = f; if (HEIF_RE.test(f.name)) { b = await Prep.big(f, id); if (!b) return false; } if (this.list[this.i] !== id) return false; const u = URL.createObjectURL(b); this.cache.set(id, { url: u, blob: true, im: true, p: Promise.resolve(u) }); $('#vImg').src = u; return true; },
   step(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.show(); },
 };
 $('#vClose').onclick = () => Viewer.close(); $('#vPrev').onclick = () => Viewer.step(-1); $('#vNext').onclick = () => Viewer.step(1);
