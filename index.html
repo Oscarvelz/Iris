@@ -491,7 +491,7 @@ const fmtDur = (s) => { if (!isFinite(s)) return '…'; if (s < 90) return Math.
 let toastT; function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------------- Diagnostics log (Library → Diagnostics → Copy report) ---------------- */
-const VER = 'Iris 2.78';
+const VER = 'Iris 2.79';
 const Log = {
   lines: [], restored: 0, t0: Date.now(),
   add(lv, ...a) { const msg = a.map((x) => x instanceof Error ? (x.name + ': ' + x.message) : typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x)).join(' ').slice(0, 400);
@@ -1612,12 +1612,12 @@ const Folders = {
     // land first — and a folder-access sheet has no business ending a travelling
     // selection on its completion close. reconnectAll's finish follows the same shape.
     return new Promise((res) => {
-      const finish = (v) => { res(v); Modal.close(true); };
+      let settled = false; const settle = (v) => { if (settled) return; settled = true; res(v); }; const finish = (v) => { if (settled) return; settle(v); Modal.close(true); }; // the settled guard the shared helpers carry (R7-S1): a second fire must never pop the frame beneath
       Modal.open(h('div', {}, h('h2', {}, '📁 Reconnect ' + f.name),
         h('p', { class: 'sub' }, `Your browser forgets folder access when Iris closes. Tap Open, then “Use this folder” on ${f.name}` + (mode === 'readwrite' ? ', and Allow editing so Iris can delete.' : '.')),
         h('p', { class: 'small' }, 'If Allow won’t respond, close floating apps (fooView, screen filters, chat bubbles) first.'),
         h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => finish(false) }, 'Not now'),
-          h('button', { class: 'btn pri', onclick: async () => finish(await Folders.repick(f, mode)) }, 'Open ' + f.name))), false, () => res(false));
+          h('button', { class: 'btn pri', onclick: async () => finish(await Folders.repick(f, mode)) }, 'Open ' + f.name))), false, () => settle(false));
     });
   },
   // Re-open the system picker on a folder whose access Android dropped. Returns true when access is back.
@@ -2042,21 +2042,37 @@ const Dups = {
       const gm = new Map(); ids.forEach((id, i) => { if (!L.meta.has(id)) return; const r = f(i); if (!gm.has(r)) gm.set(r, []); gm.get(r).push(id); });
       let maxSharp = 1; for (const id of ids) maxSharp = Math.max(maxSharp, L.meta.get(id)?.sharp || 0);
       const gs = [...gm.values()].filter((g) => g.length > 1).map((g) => { const q = g.map((id) => this.quality(L.meta.get(id), maxSharp)); const bi = q.indexOf(Math.max(...q)); const best = g[bi]; const rest = g.filter((x) => x !== best); return { key: [...g].sort().join('|'), best, ids: [best, ...rest], size: rest.reduce((s, id) => s + (L.meta.get(id)?.size || 0), 0) }; })
-        .filter((g) => !this.dismissed.has(g.key) && !this.dismissed.has(g.key.slice(0, 300))).sort((a, b) => b.ids.length - a.ids.length);
+        .filter((g) => !this.isDismissed(g)).sort((a, b) => b.ids.length - a.ids.length);
       // The store belongs to the latest run only (R5-I5): a superseded run that
       // reaches the tail computes its groups and drops them, never overwriting.
       if (run === this.run) this.groups = gs;
       return this.groups;
     }
   },
-  dismiss(g) { this.dismissed.add(g.key); this.persist(); },
+  dismiss(g) { this._dv = (this._dv || 0) + 1; this.dismissed.add(g.key); this.persist(); },
+  // A dismissal is a decision about a SET of photos, and the live set can
+  // shrink under it (R7-I2): bin one member of a dismissed group from Search
+  // and the next find re-forms the group from its survivors under a NEW exact
+  // key, so the group Oscar kept walked back onto the screen with its
+  // surviving copy pre-marked — the exact-key test (and its 300-char prefix
+  // form, which compares the candidate's slice against stored FULL keys) can
+  // never cover a subset. So the test asks about membership: a group stands
+  // dismissed when some stored dismissal's members cover every member the
+  // group has now. The exact and prefix tests stand first — they are what the
+  // stored keys have always spoken — and the cover test parses the stored
+  // keys, cached and rebuilt whenever the set moves (dismiss and persist are
+  // the only doors; both bump the version). A group that GAINS a member is
+  // NOT covered: the new photo was never dispositioned, and showing the group
+  // for its sake is the honest act.
+  isDismissed(g) { if (this.dismissed.has(g.key) || this.dismissed.has(g.key.slice(0, 300))) return true; const mem = g.ids && g.ids.length ? g.ids : g.key.split('|'); for (const s of this._dismissedSets()) { if (s.size >= mem.length && mem.every((id) => s.has(id))) return true; } return false; },
+  _dismissedSets() { const d = this.dismissed, dv = this._dv || 0; if (this._dsets && this._dsets.n === d.size && this._dsets.dv === dv) return this._dsets.sets; const sets = []; for (const k of d) sets.push(new Set(k.split('|'))); this._dsets = { n: d.size, dv, sets }; return sets; },
   // Persisting merges against the CURRENTLY STORED set first (R5-D9): the durable
   // list is a full rewrite from this tab's memory, and a second tab that booted
   // alongside this one holds a boot-time copy — whichever tab wrote second used to
   // erase the first tab's dismissal wholesale, silently un-hiding a group at the
   // next launch. The trace learned this re-read in R4-D5; the dismissed set now has
   // the same discipline: union with what is stored, then write.
-  persist() { let cur = null; try { const raw = localStorage.getItem('iris-dismissed'); if (raw != null) { const a = JSON.parse(raw); if (Array.isArray(a)) cur = a; } } catch {}
+  persist() { this._dv = (this._dv || 0) + 1; let cur = null; try { const raw = localStorage.getItem('iris-dismissed'); if (raw != null) { const a = JSON.parse(raw); if (Array.isArray(a)) cur = a; } } catch {}
     // A stored set that has lost baseline keys since this tab's baseline was a
     // REMOVAL (R6-D8, strengthened R7-D3): persist only ever unions, so the only
     // ways a key this tab once synced can be missing from what is stored now are
@@ -2470,7 +2486,7 @@ $('#vPic').addEventListener('touchcancel', () => { Zoom.g = null; if (Zoom.s > 1
    while its frame is the one being shown (live in the stack, and its stage still
    in the document — a prompt or sheet opened over it disconnects the stage and
    keeps the keys for itself). Escape and every other modal keep their order. */
-document.addEventListener('keydown', (e) => { if ($('#modal').classList.contains('on')) { if (e.key === 'Escape') { Modal.close(true); return; } if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && Compare.live && Compare.els?.stage?.isConnected) Compare.step(e.key === 'ArrowRight' ? 1 : -1); return; } if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
+document.addEventListener('keydown', (e) => { if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; if ($('#modal').classList.contains('on')) { if (e.key === 'Escape') { Modal.close(true); return; } if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && Compare.live && Compare.els?.stage?.isConnected) Compare.step(e.key === 'ArrowRight' ? 1 : -1); return; } if (!$('#viewer').classList.contains('on')) return; if (e.key === 'ArrowRight') Viewer.step(1); if (e.key === 'ArrowLeft') Viewer.step(-1); if (e.key === 'Escape') Viewer.close(); });
 
 /* ---------------- Compare (Clean · duplicate groups) ----------------
    Press-and-hold a photo in a duplicate group: the whole group opens big, one photo at a time in a
@@ -2577,7 +2593,7 @@ const Back = {
 history.replaceState({ iris: 0 }, ''); history.pushState({ iris: 1 }, '');
 addEventListener('popstate', () => { if (Back.handler()) history.pushState({ iris: 1 }, ''); });
 /* ---------------- Modal ---------------- */
-const Modal = { _stack: [], get _cancel() { const f = this._stack[this._stack.length - 1]; return f ? f.onCancel : null; }, _show(f) { const b = $('#mBody'); b.innerHTML = ''; b.style.width = f.wide ? 'min(1100px,100%)' : ''; b.append(f.content); $('#modal').classList.add('on'); }, open(content, wide, onCancel) { const f = { content, wide: !!wide, onCancel: onCancel || null }; this._stack.push(f); this._show(f); if (Sel.on) updSel(); }, replace(content, wide, onCancel) { if (!this._stack.length) return this.open(content, wide, onCancel); const f = this._stack[this._stack.length - 1]; f.content = content; f.wide = !!wide; f.onCancel = onCancel || null; this._show(f); if (Sel.on) updSel(); }, close(cancel) { const f = this._stack.pop(); if (!f) { $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); return; } if (this._stack.length) { this._show(this._stack[this._stack.length - 1]); if (cancel && f.onCancel) f.onCancel(); return; } $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); if (cancel && f.onCancel) f.onCancel(); } };
+const Modal = { _stack: [], get _cancel() { const f = this._stack[this._stack.length - 1]; return f ? f.onCancel : null; }, _show(f) { const b = $('#mBody'); b.innerHTML = ''; b.style.width = f.wide ? 'min(1100px,100%)' : ''; b.append(f.content); $('#modal').classList.add('on'); }, open(content, wide, onCancel) { const f = { content, wide: !!wide, onCancel: onCancel || null }; this._stack.push(f); this._show(f); if (Sel.on) updSel(); }, replace(content, wide, onCancel) { if (!this._stack.length) return this.open(content, wide, onCancel); const f = this._stack[this._stack.length - 1]; f.content = content; f.wide = !!wide; f.onCancel = onCancel || null; this._show(f); if (Sel.on) updSel(); }, close(cancel) { const f = this._stack.pop(); if (!f) { $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); return; } if (this._stack.length) { this._show(this._stack[this._stack.length - 1]); if (cancel && f.onCancel) f.onCancel(); return; } $('#modal').classList.remove('on'); if (Sel.on && !cancel) endSel(); if (cancel && f.onCancel) f.onCancel(); }, closeAll() { let f; while ((f = this._stack.pop())) { if (f.onCancel) { try { f.onCancel(); } catch {} } } $('#modal').classList.remove('on'); } };
 $('#mScrim').onclick = () => Modal.close(true);
 // The prompt/confirm helpers resolve BEFORE they close, and close with cancel (R6-I2):
 // the affirmative path used to close without cancel, so popping the last frame fired
@@ -2587,13 +2603,24 @@ $('#mScrim').onclick = () => Modal.close(true);
 // the selection, so both paths now close the same preserving way. Resolving first is
 // what makes it safe: the frame's onCancel resolves the promise with the cancel value,
 // and once the caller's value has landed that second resolution is a no-op.
-function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); const done = (v) => { res(v); Modal.close(true); };
-  Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))), false, () => res(null));
+// And the resolution itself is settled-guarded (R7-S1): the promise absorbs a
+// second resolution on its own, but the close did not absorb itself — a second
+// fire of the same button handler (or one landing after the frame was already
+// cancelled from outside) popped the NEXT frame down and ran its onCancel,
+// delivering a cancel nobody asked for to a sheet that was never dismissed.
+// The app's other promise-sheets already guard exactly this (the directory
+// picker's end, reconnectAll's finish); the two shared helpers now carry the
+// same guard, and the frame's onCancel resolves through the same settle, so
+// whichever path lands first — a button, Escape, the scrim, Back, a wholesale
+// close — is the only one that ever speaks.
+function prompt2(title, ph, val) { return new Promise((res) => { const inp = h('input', { type: 'text', placeholder: ph, value: val || '' }); let settled = false; const settle = (v) => { if (settled) return; settled = true; res(v); }; const done = (v) => { if (settled) return; settle(v); Modal.close(true); };
+  Modal.open(h('div', {}, h('h2', {}, title), h('div', { class: 'field' }, inp), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'), h('button', { class: 'btn pri', onclick: () => done(inp.value.trim() || null) }, 'Save'))), false, () => settle(null));
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); }); setTimeout(() => inp.focus(), 80); }); }
-function confirm2(title, text, okText, danger) { return new Promise((res) => { const done = (v) => { res(v); Modal.close(true); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => res(false)); }); }
+function confirm2(title, text, okText, danger) { return new Promise((res) => { let settled = false; const settle = (v) => { if (settled) return; settled = true; res(v); }; const done = (v) => { if (settled) return; settle(v); Modal.close(true); }; Modal.open(h('div', {}, h('h2', {}, title), h('p', { class: 'sub' }, text), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'), h('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), onclick: () => done(true) }, okText))), false, () => settle(false)); }); }
 
 /* ---------------- Selection bar ---------------- */
 $('#selbar').addEventListener('click', async (e) => {
+  if (typeof indexGoneShown !== 'undefined' && indexGoneShown) return; // a dead tab's bar dispatches nothing (R7-I1): indexGone ends the standing selection, and this gate keeps a re-fed set from ever acting over the recovery sheet
   const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return; const ids = [...Sel.set].filter((id) => L.meta.has(id)); // every count, toast and action below speaks only of photos that still exist (R3-I4)
   if (a === 'close') return endSel();
   if (a === 'range') return setRange(!Sel.range);
@@ -2631,7 +2658,9 @@ async function renderClean() {
     // completion's own re-render — showed it again, breaking the "won't show this group again"
     // promise its Keep-all toast and the Library both make. The consumer now applies the same
     // key test as the producer, so a dismissal holds on every render, not only after a re-find.
-    const groups = Dups.groups.map((g) => { const ids = g.ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); if (ids.length < 2) return null; let best = g.best; if (!ids.includes(best)) { let bs = -Infinity, nb = null; const mx = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp)); for (const id of ids) { const q = Dups.quality(L.meta.get(id), mx); if (q > bs) { bs = q; nb = id; } } best = nb || ids[0]; ids.splice(ids.indexOf(best), 1); ids.unshift(best); } return { ...g, ids, best }; }).filter((g) => g && g.ids.length > 1 && g.ids[0] === g.best && !Dups.dismissed.has(g.key) && !Dups.dismissed.has(g.key.slice(0, 300))); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
+    // The shared test is Dups.isDismissed, whose membership cover also holds the dismissal
+    // when the live set has shrunk under it since the group was dismissed (R7-I2).
+    const groups = Dups.groups.map((g) => { const ids = g.ids.filter((id) => { const m = L.meta.get(id); return m && m.status !== 'trash'; }); if (ids.length < 2) return null; let best = g.best; if (!ids.includes(best)) { let bs = -Infinity, nb = null; const mx = Math.max(1, ...ids.map((id) => L.meta.get(id).sharp)); for (const id of ids) { const q = Dups.quality(L.meta.get(id), mx); if (q > bs) { bs = q; nb = id; } } best = nb || ids[0]; ids.splice(ids.indexOf(best), 1); ids.unshift(best); } return { ...g, ids, best }; }).filter((g) => g && g.ids.length > 1 && g.ids[0] === g.best && !Dups.isDismissed(g)); const total = groups.reduce((s, g) => s + g.ids.length - 1, 0); const bytes = groups.reduce((s, g) => s + g.ids.filter((id) => id !== g.best).reduce((t, id) => t + (L.meta.get(id)?.size || 0), 0), 0);
     // The bulk actions below announce the operation's outcome, never a render-time
     // snapshot (R5-I3): setStatus silently filters the dead, so a count captured at
     // render — or before the confirm dialog's own await — parts from the deed
@@ -2687,18 +2716,31 @@ async function confirmDelete(ids) {
     (p ? `⚠ ${fmtN(p)} of them ${p === 1 ? "is" : "are"} in your NO DELETE folder. ` : '') + 'They’re removed from your phone for good, not moved to another bin. ' + (NATIVE ? '' : 'If your browser asks to let Iris edit the folder, choose Allow.'), 'Delete for good', true);
 }
 function renderBin() {
-  // The header count, the grid and Restore all work from this render's list; Delete all
-  // does not (R6-I6): the confirmation is the last surface read before the one
-  // irreversible act in the app, so its button recomputes the living bin at the tap
-  // and hands THAT list to confirmDelete and deleteFromDevice — never the render-time
-  // closure, which a background folder check can stale while the Bin stands open.
-  // (Restore all keeps the render list deliberately: setStatus filters the dead
-  // silently and its toast promises no count.)
+  // The header count and the grid work from this render's list; the two bulk
+  // buttons do not. Delete all recomputes the living bin at the tap (R6-I6):
+  // the confirmation is the last surface read before the one irreversible act
+  // in the app, so it never speaks from the render-time closure, which a
+  // background folder check can stale while the Bin stands open. Restore all
+  // goes one step further and asks the STORE who is in the bin (R7-I3): a
+  // photo another tab binned after this render stands in this tab's memory as
+  // a live photo, so no memory-side recompute can ever see it — yet the old
+  // handler restored only the render list and announced a total, "Restored
+  // everything", over a bin the store still held. The total may only be said
+  // about the bin as the store holds it at the tap: the handler unions the
+  // store's bin with memory's, restores what this tab knows, and names any
+  // remainder it could not reach instead of folding it into the claim.
   const body = $('#binBody'); body.innerHTML = ''; UI.binCount(); const ids = binIds(); const bytes = ids.reduce((s, id) => s + (L.meta.get(id).size || 0), 0);
   if (!ids.length) return body.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '🗑️'), h('p', {}, 'The bin is empty. Select photos anywhere and tap Bin.')));
   body.append(h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'cnt' }, fmtN(ids.length), h('span', { class: 'small' }, ' in the bin' + (bytes ? ' · ' + fmtMB(bytes) : ''))),
     h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px' },
-      h('button', { class: 'btn', onclick: async () => { if (!(await setStatus(ids, null))) return; renderBin(); UI.refreshLight(); toast('Restored everything'); } }, 'Restore all'),
+      h('button', { class: 'btn', onclick: async () => { let now = binIds(); let storeBin = null;
+        try { storeBin = new Set(); if (typeof DB.all === 'function') { for (const pair of await DB.all('meta')) if (pair[1] && pair[1].status === 'trash') storeBin.add(pair[0]); } else { for (const id of L.ids) { const m = await DB.get('meta', id); if (m && m.status === 'trash') storeBin.add(id); } } } catch { storeBin = null; }
+        if (storeBin) now = [...new Set([...now, ...[...storeBin].filter((id) => L.meta.has(id))])];
+        if (!(await setStatus(now, null))) return; renderBin(); UI.refreshLight();
+        const left = storeBin ? [...storeBin].filter((id) => !now.includes(id)) : [];
+        if (!storeBin) toast(`Restored ${now.length}`);
+        else if (left.length) toast(`Restored ${now.length} — ${left.length} more ${left.length === 1 ? 'photo sits' : 'photos sit'} in the bin in a newer copy of the index; reload Iris to restore ${left.length === 1 ? 'it' : 'them'}.`, 5500);
+        else toast('Restored everything'); } }, 'Restore all'),
       h('button', { class: 'btn danger', onclick: async () => { const now = binIds(); if (!now.length) { renderBin(); return; } if (await confirmDelete(now)) { await deleteFromDevice(now); renderBin(); } } }, 'Delete all')),
     h('p', { class: 'small', style: 'margin-top:10px' }, 'Long-press a photo to pick only some.')));
   body.append(grid(ids, { noTrashStyle: true, loc: true }));
@@ -2912,6 +2954,22 @@ function indexGone() {
   try { Indexer.epoch++; Indexer.paused = true; Indexer.queue.length = 0; Indexer.later = []; for (const f of L.folders.values()) Indexer.removed.add(f.id); } catch {}
   try { if (typeof ThumbFix !== 'undefined' && ThumbFix) { ThumbFix.halted = true; ThumbFix.q.length = 0; } } catch {} // the thumbnail fixer stops with everything else (R6-D6): a decode parked when the telling lands must not write its thumbnail into the cleared store afterwards
   try { Work.stop(); } catch {}
+  // The foreground stands down with the background (R7-I1): the recovery sheet
+  // is a plain overlay (z-20) stacked UNDER the Viewer (z-40), the modal (z-45)
+  // and the floating selection bar (z-46), and standing only the background
+  // down left every one of them armed above a sheet that declares nothing here
+  // can be saved anymore — a travelling selection could still dispatch Best and
+  // Bin, a standing prompt could still resolve and cycle the stack, and the
+  // keyboard could still step the Viewer through the whole dead library. So
+  // the telling also ends the selection, closes the Viewer, and cancels every
+  // standing modal frame where it stands — each frame's onCancel gives a
+  // standing prompt its honest cancel answer and clears Compare's live flag —
+  // and the keyboard and selection-bar handlers refuse the dead world from
+  // here on, so nothing can re-arm above the sheet. A tab caught mid-Compare
+  // or mid-prompt lands in exactly this state.
+  try { if (typeof Sel !== 'undefined' && Sel && Sel.on) endSel(); } catch {}
+  try { if (typeof Viewer !== 'undefined' && Viewer) Viewer.close(); } catch {}
+  try { if (typeof Modal !== 'undefined' && Modal) Modal.closeAll(); } catch {}
   const e = new Error('the index was erased in another Iris tab'); e.erased = true;
   bootRecovery(e);
 }
